@@ -34,6 +34,12 @@ per-instruction engine latencies.
 
 ## GPU pilot scope
 
+A follow-up adds source-only program and dependency distributions with control-only
+feature selection. See [the experiment and reproduction commands](gpu_distribution_results.md)
+for the 60-control/12-new-holdout result, limitations, and frozen-model integration.
+The broader [NKI 254 logical-case GPU diagnostic](gpu_tilebench254_results.md)
+reports 18.55% MAPE, but all points are OOD and nine require explicit adapters.
+
 The initial suite has 36 primitive controls and 15 composed holdouts: SiLU,
 affine/ReLU, softmax, RMSNorm, and batched dot with bias/ReLU. Control input sizes
 are 4,096 / 16,384 / 65,536 / 262,144 elements; holdout sizes are interleaved at
@@ -59,6 +65,12 @@ validation, resource/occupancy controls, and broader predeclared application
 holdouts. Do not present the pilot as already providing that evidence.
 
 ## Run the GPU experiment
+
+Benchmark kernels, role-separated configurations, and timing now live in
+[`microbench/gpu/`](../microbench/gpu/README.md), aligned with the existing NKI
+experiment tree. Prediction code stays in `triton_viz/performance/`; fitting and
+evaluation CLIs stay in `triton_viz/tools/` for both backends. The equivalent
+collection entry point is `python -m microbench.gpu.harness.run_microbench`.
 
 Install a CUDA-capable PyTorch build compatible with the GPU and Triton, plus
 the optional `gpu` dependencies (`torch`, `nvidia-ml-py`). For example, in an

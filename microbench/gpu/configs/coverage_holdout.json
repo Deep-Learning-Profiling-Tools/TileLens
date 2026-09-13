@@ -1,0 +1,7 @@
+{
+  "schema": "triton-viz.gpu-cases.v1",
+  "suite": "coverage",
+  "role": "holdout",
+  "cases": [],
+  "note": "Control-only expansion. The 254 target points remain in their separate evaluation pipeline; they are never imported as controls."
+}

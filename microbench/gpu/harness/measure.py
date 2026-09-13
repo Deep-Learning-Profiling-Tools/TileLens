@@ -1,4 +1,4 @@
-"""Audited GPU timing for shared machines; never changes device settings."""
+"""GPU microbenchmark timing for shared machines; never changes device settings."""
 
 from __future__ import annotations
 

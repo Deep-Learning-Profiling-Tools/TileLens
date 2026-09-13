@@ -169,6 +169,17 @@ def expand(source, *, sm_count):
 
 def predict(source, calibration, *, fingerprint, sm_count, strict=True):
     work = expand(source, sm_count=sm_count)
+    feature_set = calibration.get("feature_set", "aggregate")
+    if feature_set != "aggregate":
+        from .gpu_distributions import FEATURE_SETS, distribution_features
+
+        if feature_set not in FEATURE_SETS:
+            raise ValueError(f"Unsupported GPU feature set: {feature_set}")
+        if tuple(calibration["feature_names"]) != FEATURE_SETS[feature_set]:
+            raise ValueError("Calibration feature schema mismatch")
+        extra, distributions = distribution_features(source)
+        work["features"].update(extra)
+        work["distributions"] = distributions
     reasons = work["ood_reasons"][:]
     configuration = source_configuration(work)
     if configuration not in calibration.get("source_configurations", []):
@@ -183,7 +194,10 @@ def predict(source, calibration, *, fingerprint, sm_count, strict=True):
         "contributions_us": contributions,
         "ood_reasons": reasons + domain_reasons,
         "work": work,
-        "backend": "gpu-source-service-v1",
+        "backend": "gpu-source-service-v1"
+        if feature_set == "aggregate"
+        else "gpu-source-distribution-v1",
+        "feature_set": feature_set,
         "experimental": True,
         "metric": "cuda_graph_steady_cache_kernel_us",
     }

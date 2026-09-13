@@ -1,4 +1,4 @@
-"""Independent primitive controls and fused holdouts for the GPU pilot.
+"""Primitive GPU kernels; control/holdout membership is declared in configs.
 
 All launch choices are explicit. There is no autotuning or target-assembly read.
 """
@@ -62,39 +62,9 @@ def dot(X, Y, Z, BLOCK: tl.constexpr, REPEAT: tl.constexpr, BIAS: tl.constexpr):
 
 
 def cases(role):
-    if role == "control":
-        result = []
-        for n in (4096, 16384, 65536, 262144):
-            for mode, repeat in ((0, 1), (1, 1), (1, 8), (2, 1), (2, 8)):
-                result.append(
-                    dict(kind="elementwise", n=n, block=512, mode=mode, repeat=repeat)
-                )
-            for mode in (0, 1):
-                result.append(
-                    dict(kind="reduction", n=n, block=512, mode=mode, repeat=1)
-                )
-            for repeat in (1, 4):
-                result.append(dict(kind="dot", n=n, block=16, mode=0, repeat=repeat))
-    elif role == "holdout":
-        result = []
-        for n in (8192, 32768, 131072):
-            for mode in (3, 4):
-                result.append(
-                    dict(kind="elementwise", n=n, block=512, mode=mode, repeat=1)
-                )
-            for mode in (2, 3):
-                result.append(
-                    dict(kind="reduction", n=n, block=512, mode=mode, repeat=1)
-                )
-            result.append(dict(kind="dot", n=n, block=16, mode=1, repeat=2))
-    else:
-        raise ValueError("Unknown artifact role")
-    for case in result:
-        case["id"] = "_".join(
-            str(case[key]) for key in ("kind", "n", "block", "mode", "repeat")
-        )
-        case["cv_group"] = str(case["n"])
-    return result
+    from microbench.gpu.common.cases import load_cases
+
+    return load_cases("pilot", role)
 
 
 def prepare(case, device):

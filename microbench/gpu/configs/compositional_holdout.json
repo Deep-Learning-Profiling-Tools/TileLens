@@ -1,0 +1,115 @@
+{
+  "schema": "triton-viz.gpu-cases.v1",
+  "suite": "compositional",
+  "role": "holdout",
+  "cases": [
+    {
+      "kind": "validation",
+      "n": 12288,
+      "block": 512,
+      "mode": 0,
+      "repeat": 1,
+      "id": "validation_12288_512_0_1",
+      "cv_group": "12288"
+    },
+    {
+      "kind": "validation",
+      "n": 12288,
+      "block": 512,
+      "mode": 1,
+      "repeat": 1,
+      "id": "validation_12288_512_1_1",
+      "cv_group": "12288"
+    },
+    {
+      "kind": "validation",
+      "n": 12288,
+      "block": 512,
+      "mode": 2,
+      "repeat": 1,
+      "id": "validation_12288_512_2_1",
+      "cv_group": "12288"
+    },
+    {
+      "kind": "validation",
+      "n": 12288,
+      "block": 512,
+      "mode": 3,
+      "repeat": 1,
+      "id": "validation_12288_512_3_1",
+      "cv_group": "12288"
+    },
+    {
+      "kind": "validation",
+      "n": 49152,
+      "block": 512,
+      "mode": 0,
+      "repeat": 1,
+      "id": "validation_49152_512_0_1",
+      "cv_group": "49152"
+    },
+    {
+      "kind": "validation",
+      "n": 49152,
+      "block": 512,
+      "mode": 1,
+      "repeat": 1,
+      "id": "validation_49152_512_1_1",
+      "cv_group": "49152"
+    },
+    {
+      "kind": "validation",
+      "n": 49152,
+      "block": 512,
+      "mode": 2,
+      "repeat": 1,
+      "id": "validation_49152_512_2_1",
+      "cv_group": "49152"
+    },
+    {
+      "kind": "validation",
+      "n": 49152,
+      "block": 512,
+      "mode": 3,
+      "repeat": 1,
+      "id": "validation_49152_512_3_1",
+      "cv_group": "49152"
+    },
+    {
+      "kind": "validation",
+      "n": 196608,
+      "block": 512,
+      "mode": 0,
+      "repeat": 1,
+      "id": "validation_196608_512_0_1",
+      "cv_group": "196608"
+    },
+    {
+      "kind": "validation",
+      "n": 196608,
+      "block": 512,
+      "mode": 1,
+      "repeat": 1,
+      "id": "validation_196608_512_1_1",
+      "cv_group": "196608"
+    },
+    {
+      "kind": "validation",
+      "n": 196608,
+      "block": 512,
+      "mode": 2,
+      "repeat": 1,
+      "id": "validation_196608_512_2_1",
+      "cv_group": "196608"
+    },
+    {
+      "kind": "validation",
+      "n": 196608,
+      "block": 512,
+      "mode": 3,
+      "repeat": 1,
+      "id": "validation_196608_512_3_1",
+      "cv_group": "196608"
+    }
+  ]
+}

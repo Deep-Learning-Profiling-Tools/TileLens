@@ -1,0 +1,7 @@
+{
+  "schema": "triton-viz.gpu-holdout-reference.v1",
+  "role": "holdout",
+  "source": "inf2_nki/configs/formal_holdouts.json",
+  "deduplicated_case_count": 254,
+  "note": "Shared logical cases with NKI; never a calibration/control suite. Physical implementations and timing protocols differ."
+}

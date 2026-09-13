@@ -5,7 +5,7 @@ import pytest
 from triton_viz.performance.calibration import fit_controls, price, stable_digest
 from triton_viz.performance.grammar import GrammarRule, select_rule
 from triton_viz.performance.gpu import expand
-from triton_viz.performance.gpu_measure import BusyGPU, assert_available
+from microbench.gpu.harness.measure import BusyGPU, assert_available
 
 
 def _controls():

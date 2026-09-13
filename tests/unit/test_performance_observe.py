@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 
 from triton_viz.performance.triton_observe import observe
-from triton_viz.performance.gpu_controls import cases, prepare, check_output
+from microbench.gpu.tests.primitive.kernels import cases, prepare, check_output
 from triton_viz.performance.gpu import expand
 
 
@@ -30,6 +30,35 @@ def test_observe_masked_launch_without_compilation(monkeypatch):
     assert sum(e["bytes"] for e in memory) == 13 * 4 * 2
     assert any(e["masked"] for e in memory)
     assert any(e.get("primitive") == "add" for e in trace["events"])
+    for store in (e for e in memory if e["op"] == "store"):
+        assert any(
+            trace["events"][dep].get("primitive") == "add"
+            for dep in store["dependencies"]
+        )
+
+
+def test_dot_accumulator_and_raw_store_dependencies():
+    import triton_viz
+    from triton_viz.performance.gpu_distributions import distribution_features
+
+    case = dict(kind="dot", n=512, block=16, mode=0, repeat=3)
+    kernel, grid, args, output = prepare(case, "cpu")
+    try:
+        source = observe(kernel, grid, *args)
+        check_output(case, output)
+        for program in range(2):
+            events = [e for e in source["events"] if e["program"][0] == program]
+            dots = [e for e in events if e["op"] == "dot"]
+            assert len(dots) == 3
+            for previous, current in zip(dots, dots[1:]):
+                assert previous["seq"] in current["dependencies"]
+            stores = [e for e in events if e["op"] in {"store", "raw_store"}]
+            assert len(stores) == 1
+            assert dots[-1]["seq"] in stores[0]["dependencies"]
+        # Validate topological ordering and absence of cross-program edges.
+        distribution_features(source)
+    finally:
+        triton_viz.clear()
 
 
 @pytest.mark.parametrize(

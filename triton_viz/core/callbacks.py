@@ -7,6 +7,8 @@ class OpCallbacks:
     before_callback: Callable | None = None
     after_callback: Callable | None = None
     op_overrider: Callable | None = None
+    # Receives (ret, *original_args, **original_kwargs), after the adapted hook.
+    raw_after_callback: Callable | None = None
 
 
 @dataclass

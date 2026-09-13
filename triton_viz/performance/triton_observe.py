@@ -7,6 +7,7 @@ Every launched program is observed; there is no implicit grid extrapolation.
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager, ExitStack
 from typing import Any
 
 import numpy as np
@@ -140,10 +141,83 @@ class PerformanceTrace(Client):
                 self._values[id(output)] = seq
                 self._keepalive.append(output)
 
+        @self.lock_fn
+        def raw_after(ret, *args, **kwargs):
+            # Adapters omit store values and dot accumulators. Recover these
+            # edges without changing existing clients' adapted hook contracts.
+            # A delegated raw transfer has already been recorded by its masked
+            # operation, including its operands, so do not record it twice.
+            if not self.events or self.events[-1]["op"] != name:
+                return
+            event = self.events[-1]
+            dependencies = set(event["dependencies"])
+            for value in (*args, *kwargs.values()):
+                array = self._array(value)
+                dependency = self._values.get(id(array)) if array is not None else None
+                if dependency is not None and dependency < event["seq"]:
+                    dependencies.add(dependency)
+            event["dependencies"] = sorted(dependencies)
+
         return OpCallbacks(
             before_callback=before if name in {"raw_load", "raw_store"} else None,
             after_callback=after,
+            raw_after_callback=raw_after
+            if name in {"store", "raw_store", "dot"}
+            else None,
         )
+
+
+@contextmanager
+def _bf16_constant_compat():
+    """Fix BF16 scalar construction and uint16 arithmetic in CPU interpretation."""
+    from unittest.mock import patch
+
+    import triton.language as tl
+    from triton.runtime.interpreter import InterpreterBuilder, TensorHandle
+
+    def encode(values):
+        values = np.asarray(values, dtype=np.float32)
+        bits = values.view(np.uint32)
+        # Round to nearest, ties to even; preserve NaN rather than rounding it
+        # into infinity. The interpreter's generic converter rounds ties up.
+        rounded = ((bits + np.uint32(0x7FFF) + ((bits >> 16) & 1)) >> 16).astype(
+            np.uint16
+        )
+        rounded[np.isnan(values)] = np.uint16(0x7FC0)
+        return TensorHandle(rounded, tl.bfloat16)
+
+    def get_bf16(self, value):
+        return encode([value])
+
+    def decode(value):
+        if value.dtype.scalar == tl.bfloat16:
+            return TensorHandle(
+                (value.data.astype(np.uint32) << 16).view(np.float32), tl.float32
+            )
+        return value
+
+    from triton_viz.core.frontend.base import get_frontend
+
+    frontend = get_frontend("triton")
+    operations = frontend.original_ops[frontend.builder]
+    original_binary, original_dot = operations["binary_op"], operations["create_dot"]
+
+    def binary(lhs, rhs, op):
+        result = original_binary(decode(lhs), decode(rhs), op)
+        return encode(result.data) if lhs.dtype.scalar == tl.bfloat16 else result
+
+    def dot(a, b, *args, **kwargs):
+        return original_dot(decode(a), decode(b), *args, **kwargs)
+
+    with ExitStack() as stack:
+        if not hasattr(InterpreterBuilder, "get_bf16"):
+            stack.enter_context(
+                patch.object(InterpreterBuilder, "get_bf16", get_bf16, create=True)
+            )
+        stack.enter_context(
+            patch.dict(operations, {"binary_op": binary, "create_dot": dot})
+        )
+        yield
 
 
 def observe(kernel, grid, *args, num_warps=4, num_stages=2, **kwargs):
@@ -159,9 +233,10 @@ def observe(kernel, grid, *args, num_warps=4, num_stages=2, **kwargs):
     if hasattr(kernel, "configs"):
         raise ValueError("Resolve autotuning before pre-compile prediction")
     trace = PerformanceTrace()
-    triton_viz.trace(trace)(kernel)[grid](
-        *args, num_warps=num_warps, num_stages=num_stages, **kwargs
-    )
+    with _bf16_constant_compat():
+        triton_viz.trace(trace)(kernel)[grid](
+            *args, num_warps=num_warps, num_stages=num_stages, **kwargs
+        )
     return {
         "schema": "triton-viz.gpu-source.v1",
         "grid": list(trace.grid),

@@ -908,9 +908,18 @@ class TritonFrontend(Frontend):
         # attributes in-place and older Triton versions do not retain enough
         # restore metadata for nested/generated kernels.
         scope = self._triton_snapshot_scope(fn)
+        # Extra-module builtins are outside the core language snapshot. Older
+        # Triton patchers do not accept a restore scope, so save them ourselves.
+        for module in self._triton_extra_modules:
+            for name, member in inspect.getmembers(module):
+                if tl.core.is_builtin(member):
+                    scope.save_attr(module, name)
         triton_patch_lang(fn)
         for module in self._triton_extra_modules:
-            _patch_builtin(module, interpreter_builder, scope)
+            if "scope" in inspect.signature(_patch_builtin).parameters:
+                _patch_builtin(module, interpreter_builder, scope)
+            else:
+                _patch_builtin(module, interpreter_builder)
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
         scope.set_attr(knobs.runtime, "interpret", True)

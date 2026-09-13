@@ -25,13 +25,28 @@ def _write(path, value):
     temporary.replace(path)
 
 
+def _source_digest():
+    import microbench.gpu
+
+    package = Path(__file__).parents[1]
+    benchmark = Path(microbench.gpu.__file__).parent
+    return stable_digest(
+        {
+            f"{prefix}/{path.relative_to(root)}": hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for prefix, root in (("triton_viz", package), ("microbench/gpu", benchmark))
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and path.suffix in {".py", ".json"}
+        }
+    )
+
+
 def _identity(device):
     import torch
-    from triton_viz.performance.gpu_measure import snapshot
+    from microbench.gpu.harness.measure import snapshot
 
     props = torch.cuda.get_device_properties(device)
-    package = Path(__file__).parents[1]
-    files = sorted(package.rglob("*.py"))
     return {
         "backend": "gpu-source-service-v1",
         "gpu": props.name,
@@ -44,24 +59,39 @@ def _identity(device):
             name: importlib.metadata.version(name)
             for name in ("torch", "triton", "numpy", "nvidia-ml-py")
         },
-        "source_digest": stable_digest(
-            {
-                str(p.relative_to(package)): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in files
-            }
-        ),
+        "source_digest": _source_digest(),
         "num_warps": 4,
         "num_stages": 2,
         "metric": "cuda_graph_steady_cache_kernel_us",
     }
 
 
-def collect(root, *, device=0, role="all", resume=False, allow_idle_graphics=False):
+def collect(
+    root,
+    *,
+    device=0,
+    role="all",
+    resume=False,
+    allow_idle_graphics=False,
+    suite="pilot",
+):
     import torch
     import triton_viz
-    from triton_viz.performance.gpu_controls import cases, prepare, check_output
-    from triton_viz.performance.gpu_measure import assert_available, snapshot, measure
+    from microbench.gpu.harness.measure import assert_available, snapshot, measure
     from triton_viz.performance.triton_observe import observe
+
+    if suite == "coverage":
+        from microbench.gpu.tests.coverage.kernels import cases, prepare, check_output
+    elif suite == "compositional":
+        from microbench.gpu.tests.compositional.kernels import (
+            cases,
+            prepare,
+            check_output,
+        )
+    elif suite == "pilot":
+        from microbench.gpu.tests.primitive.kernels import cases, prepare, check_output
+    else:
+        raise ValueError("Unknown GPU experiment suite")
 
     baseline = snapshot(device)
     allowed_graphics = (
@@ -75,6 +105,7 @@ def collect(root, *, device=0, role="all", resume=False, allow_idle_graphics=Fal
     torch.cuda.set_device(device)
     identity = _identity(device)
     identity["allow_idle_graphics"] = allow_idle_graphics
+    identity["suite"] = suite
     fingerprint = stable_digest(identity)
     manifest = {
         "identity": identity,
@@ -102,7 +133,11 @@ def collect(root, *, device=0, role="all", resume=False, allow_idle_graphics=Fal
                 snapshot(device), own_pid=os.getpid(), allowed_graphics=allowed_graphics
             )
             kernel, grid, args, out = prepare(case, "cpu")
-            source = observe(kernel, grid, *args, num_warps=4, num_stages=2)
+            launch_options = {
+                k: case.get(k, default)
+                for k, default in (("num_warps", 4), ("num_stages", 2))
+            }
+            source = observe(kernel, grid, *args, **launch_options)
             check_output(case, out)
             work = expand(source, sm_count=identity["sm_count"])
             if work["ood_reasons"]:
@@ -111,7 +146,7 @@ def collect(root, *, device=0, role="all", resume=False, allow_idle_graphics=Fal
             kernel, grid, args, out = prepare(case, f"cuda:{device}")
 
             def launch():
-                kernel[grid](*args, num_warps=4, num_stages=2)
+                kernel[grid](*args, **launch_options)
 
             for attempt in range(3):
                 measured = measure(
@@ -251,6 +286,9 @@ def main(argv=None):
     parser.add_argument("--role", choices=("all", "control", "holdout"), default="all")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--suite", choices=("pilot", "compositional", "coverage"), default="pilot"
+    )
+    parser.add_argument(
         "--allow-idle-graphics",
         action="store_true",
         help="Permit existing graphics PIDs after three idle checks; results are labeled shared-desktop",
@@ -280,6 +318,7 @@ def main(argv=None):
             role=args.role,
             resume=args.resume,
             allow_idle_graphics=args.allow_idle_graphics,
+            suite=args.suite,
         )
     elif args.stage == "fit":
         fit(args.root)

@@ -15,6 +15,34 @@ def _dummy_kernel():
     return tl.arange(0, 1)
 
 
+@pytest.mark.parametrize("accepts_scope", [False, True])
+def test_extra_builtin_patcher_signatures_and_restoration(monkeypatch, accepts_scope):
+    frontend = triton_frontend.frontend
+    original = tl.arange
+    module = SimpleNamespace(arange=original)
+    calls = []
+
+    def old_patcher(pkg, builder):
+        calls.append(pkg)
+        pkg.arange = lambda: None
+
+    def new_patcher(pkg, builder, scope):
+        calls.append(pkg)
+        scope.set_attr(pkg, "arange", lambda: None)
+
+    monkeypatch.setattr(frontend, "_triton_extra_modules", (module,))
+    monkeypatch.setattr(
+        triton_frontend, "_patch_builtin", new_patcher if accepts_scope else old_patcher
+    )
+    scope = frontend.patch_lang(_dummy_kernel)
+    try:
+        assert calls == [module]
+        assert module.arange is not original
+    finally:
+        scope.restore()
+    assert module.arange is original
+
+
 _TL_CORE_ALIAS = tl.core
 
 

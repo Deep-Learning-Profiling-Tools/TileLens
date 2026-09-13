@@ -41,6 +41,7 @@ class PatchOp:
         self.before_callback = callbacks.before_callback
         self.after_callback = callbacks.after_callback
         self.op_overrider = callbacks.op_overrider
+        self.raw_after_callback = callbacks.raw_after_callback
         self.adapter = adapter
         # Frontend hooks are resolved before installing the wrapper so __call__
         # stays independent of frontend registry lookups.
@@ -67,7 +68,11 @@ class PatchOp:
     def __call__(self, *args, **kwargs):
         self.maybe_yield_for_multism()
 
-        if not self.before_callback and not self.after_callback:
+        if (
+            not self.before_callback
+            and not self.after_callback
+            and not self.raw_after_callback
+        ):
             if self.op_overrider:
                 return self.run_op_overrider(
                     self.op,
@@ -97,6 +102,8 @@ class PatchOp:
             # Pass ret so that we don't have to derive output shape from args.
             after_args = self.adapter(*args, **kwargs)
             self.after_callback(ret, *after_args.args, **after_args.kwargs)
+        if self.raw_after_callback:
+            self.raw_after_callback(ret, *args, **kwargs)
         return ret
 
 
