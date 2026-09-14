@@ -3,6 +3,10 @@
 Date: 2026-09-11. GPU: NVIDIA GB10, 48 SMs. No calibration coefficient or feature
 selection was changed using these targets.
 
+Follow-up: [2026-09-14 error attribution and control priorities](gpu_error_audit.md)
+reproduces the frozen result and identifies the largest contributions; it does
+not report a newly fitted model or an accuracy improvement.
+
 ## Outcome
 
 All 254 logical cases now have a prediction and hardware measurement. The
