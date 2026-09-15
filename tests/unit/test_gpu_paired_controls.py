@@ -13,7 +13,7 @@ def test_coverage_preserves_originals_and_adds_grouped_pairs():
     assert len(PAIRS) == 64
     assert cases[416:] == PAIRS
     assert len({c["id"] for c in cases}) == 480
-    assert load_cases("coverage", "holdout") == []
+    assert len(load_cases("coverage", "holdout")) == 32
     for index in range(0, len(PAIRS), 2):
         a, b = PAIRS[index : index + 2]
         assert a["cv_group"] == b["cv_group"]

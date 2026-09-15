@@ -103,8 +103,13 @@ independent Torch references; their numerical outputs need not match each other.
 Pairs share their `cv_group` (block/depth, across operations and dtypes), so the
 existing grouped/nested control-only fitter cannot split paired observations
 between training and validation. No holdout data is loaded to expand the matrix.
-The coverage holdout declaration is still empty; fresh validation must be
-declared before GPU collection and evaluation.
+The coverage holdout declaration now contains 32 fresh validation cases:
+four compositions (centered energy plus residual, softmax residual, mean-gated
+input, and max-centered RMS scaling), 3/12 programs, blocks 512/2048, and
+FP32/BF16 input storage with FP32 output. The new bodies are in
+`tests/coverage/validation.py`; their IDs, kinds and CV groups are disjoint from
+controls. Membership and numerical tolerances were fixed before GPU timing.
+Validation latencies must not be read by fitting or used for candidate selection.
 
 Run all 32 paired correctness/dependency audits without CUDA initialization or
 target compilation:

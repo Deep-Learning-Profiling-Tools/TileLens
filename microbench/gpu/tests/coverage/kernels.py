@@ -66,6 +66,10 @@ def _values(shape, dtype):
 
 
 def prepare(case, device):
+    if case["kind"] == "coverage_validation":
+        from .validation import prepare as prepare_validation
+
+        return prepare_validation(case, device)
     if case["kind"] == "coverage_paired":
         from .paired import prepare as prepare_paired
 
@@ -92,6 +96,10 @@ def prepare(case, device):
 
 
 def check_output(case, output):
+    if case["kind"] == "coverage_validation":
+        from .validation import check_output as check_validation
+
+        return check_validation(case, output)
     if case["kind"] == "coverage_paired":
         from .paired import check_output as check_paired
 
