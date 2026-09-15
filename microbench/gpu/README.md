@@ -85,6 +85,48 @@ fingerprint: use a fresh collection root. Historical raw measurements, frozen
 calibrations, and source archives are not rewritten. CPU-only fitting/evaluation
 of archived data remains possible without recapturing hardware timings.
 
+## Single-program paired controls (CPU-ready)
+
+`coverage` control loading preserves the original 416 cases and appends 64 cases
+expanded from `configs/serial_parallel_control.json`, for **480 controls** total.
+The new 32 pairs cross ALU/SFU/sum/max, blocks 512/2048, depths 2/4 and
+FP32/BF16 input storage. Accumulation and outputs are FP32; launches use one
+program, four warps and two stages.
+
+Each pair performs the same source floating operations, loads and stage stores.
+Serial mode connects all `2 * depth` stages into one chain; parallel mode has two
+independent chains of `depth` stages. Every intermediate stage is written to a
+distinct output region to keep its value observable. Sum/max stages broadcast
+the preceding scalar result into the next vector input. Both variants have
+independent Torch references; their numerical outputs need not match each other.
+
+Pairs share their `cv_group` (block/depth, across operations and dtypes), so the
+existing grouped/nested control-only fitter cannot split paired observations
+between training and validation. No holdout data is loaded to expand the matrix.
+The coverage holdout declaration is still empty; fresh validation must be
+declared before GPU collection and evaluation.
+
+Run all 32 paired correctness/dependency audits without CUDA initialization or
+target compilation:
+
+```bash
+python -m microbench.gpu.harness.audit_paired
+```
+
+The audit checks equal aggregate/per-program features, floating operation
+counts/shapes and memory bytes, all floating work connected to stage stores,
+and exactly 2:1 serial/parallel path depth for the relevant component.
+Per-stage weights are 2 ALU operations, 1 SFU operation or `log2(block)` reduction
+steps. Regression tests also verify exact path lengths, memory volume and
+rejection of missing store-value edges.
+
+This establishes source-level work and dependency structure only. Static
+unrolling, fusion, register pressure, store scheduling and hardware overlap may
+change the compiled behavior. Inspect the compiled controls before interpreting
+GPU timing differences as dependency latency. Existing coefficients, frozen
+results and the 254-point MAPE are unchanged. Use a fresh fingerprint/run for
+future collection; no GPU measurements have been made for these new controls.
+
 ## Migration
 
 | Previous internal location | Current location |

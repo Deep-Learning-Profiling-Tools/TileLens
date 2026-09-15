@@ -1,0 +1,12 @@
+{
+  "schema": "triton-viz.gpu-paired-controls.v1",
+  "role": "control",
+  "programs": 1,
+  "blocks": [512, 2048],
+  "depths": [2, 4],
+  "dtypes": ["float32", "bfloat16"],
+  "operations": ["alu", "sfu", "sum", "max"],
+  "topologies": ["serial", "parallel"],
+  "num_warps": 4,
+  "num_stages": 2
+}

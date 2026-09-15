@@ -66,6 +66,10 @@ def _values(shape, dtype):
 
 
 def prepare(case, device):
+    if case["kind"] == "coverage_paired":
+        from .paired import prepare as prepare_paired
+
+        return prepare_paired(case, device)
     import torch
 
     p, repeat = case["programs"], case["repeat"]
@@ -88,6 +92,10 @@ def prepare(case, device):
 
 
 def check_output(case, output):
+    if case["kind"] == "coverage_paired":
+        from .paired import check_output as check_paired
+
+        return check_paired(case, output)
     import torch
 
     p, repeat = case["programs"], case["repeat"]
