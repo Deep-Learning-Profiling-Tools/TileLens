@@ -80,8 +80,14 @@ def collect(
     from microbench.gpu.harness.measure import assert_available, snapshot, measure
     from triton_viz.performance.triton_observe import observe
 
-    if suite == "coverage":
+    if suite in {"coverage", "precision"}:
         from microbench.gpu.tests.coverage.kernels import cases, prepare, check_output
+
+        if suite == "precision":
+            from functools import partial
+            from microbench.gpu.common.cases import load_cases
+
+            cases = partial(load_cases, "precision")
     elif suite == "compositional":
         from microbench.gpu.tests.compositional.kernels import (
             cases,
@@ -286,7 +292,9 @@ def main(argv=None):
     parser.add_argument("--role", choices=("all", "control", "holdout"), default="all")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
-        "--suite", choices=("pilot", "compositional", "coverage"), default="pilot"
+        "--suite",
+        choices=("pilot", "compositional", "coverage", "precision"),
+        default="pilot",
     )
     parser.add_argument(
         "--allow-idle-graphics",

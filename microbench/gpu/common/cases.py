@@ -8,10 +8,40 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
 def load_cases(suite, role):
-    if suite not in {"pilot", "compositional", "coverage"}:
+    if suite not in {"pilot", "compositional", "coverage", "precision"}:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "precision":
+        base = load_cases("coverage", role)
+        if role == "holdout":
+            return base
+        data = json.loads((CONFIGS / "precision_control.json").read_text())
+        if (
+            data["role"] != "control"
+            or data["schema"] != "triton-viz.gpu-dot-precision-controls.v1"
+        ):
+            raise ValueError("Invalid dot precision controls")
+        extra = []
+        for programs, repeat, (dtype, precision) in product(
+            data["programs"], data["repeats"], data["precisions"]
+        ):
+            extra.append(
+                dict(
+                    id=f"precision_dot_p{programs}_{dtype}_{precision}_r{repeat}",
+                    kind="coverage_dot",
+                    programs=programs,
+                    repeat=repeat,
+                    dtype=dtype,
+                    precision=precision,
+                    cv_group=str(programs),
+                    **{
+                        k: data[k]
+                        for k in ("bm", "bn", "bk", "num_warps", "num_stages")
+                    },
+                )
+            )
+        return base + extra
     # Only the requested role's declaration is opened. Tilebench254 cannot be
     # selected as a control suite or accidentally included in these controls.
     data = json.loads((CONFIGS / f"{suite}_{role}.json").read_text())

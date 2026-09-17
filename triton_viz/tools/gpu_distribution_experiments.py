@@ -10,7 +10,12 @@ import numpy as np
 
 from triton_viz.performance.calibration import fit_controls, stable_digest
 from triton_viz.performance.gpu import expand, predict, source_configuration
-from triton_viz.performance.gpu_distributions import FEATURE_SETS, distribution_features
+from triton_viz.performance.gpu_distributions import (
+    FEATURE_SETS,
+    LEGACY_FEATURE_SETS,
+    distribution_features,
+)
+from triton_viz.performance.gpu_dot_precision import dot_features
 from triton_viz.tools.gpu_cost_model_pipeline import _read, _write
 
 
@@ -22,25 +27,43 @@ def enrich(source, sm_count):
     return {**work["features"], **features}, source_configuration(work), distributions
 
 
-def fit(root, output):
+def fit(root, output, *, dot_precision=False):
     manifest = _read(root / "manifest.json")
     rows = []
     configurations = []
+    dot_configurations = []
+    candidate_names = (
+        ("dot_precision_aggregate", "dot_precision_combined")
+        if dot_precision
+        else LEGACY_FEATURE_SETS
+    )
     for case in manifest["splits"]["control"]:
         row = _read(root / "controls" / (case["id"] + ".json"))
         features, configuration, _ = enrich(
             row["source"], manifest["identity"]["sm_count"]
         )
+        if dot_precision:
+            extra, dot_configs, reasons = dot_features(row["source"])
+            if reasons:
+                raise ValueError(f"Unsupported control dot metadata: {reasons}")
+            features.update(extra)
+            for config in dot_configs:
+                if config not in dot_configurations:
+                    dot_configurations.append(config)
         rows.append({**row, "features": features})
         if configuration not in configurations:
             configurations.append(configuration)
     models = {
-        name: fit_controls(rows, names, fingerprint=manifest["fingerprint"])
-        for name, names in FEATURE_SETS.items()
+        name: fit_controls(
+            rows, FEATURE_SETS[name], fingerprint=manifest["fingerprint"]
+        )
+        for name in candidate_names
     }
     for name, model in models.items():
         model["feature_set"] = name
         model["source_configurations"] = configurations
+        if dot_precision:
+            model["dot_configurations"] = dot_configurations
 
     def select(candidates):
         # Numerically indistinguishable CV scores prefer the smaller model.
@@ -63,8 +86,10 @@ def fit(root, output):
         training = [r for r in rows if r["cv_group"] != group]
         testing = [r for r in rows if r["cv_group"] == group]
         inner = {
-            name: fit_controls(training, names, fingerprint=manifest["fingerprint"])
-            for name, names in FEATURE_SETS.items()
+            name: fit_controls(
+                training, FEATURE_SETS[name], fingerprint=manifest["fingerprint"]
+            )
+            for name in candidate_names
         }
         chosen = select(inner)
         coefficients = inner[chosen]["coefficients_us"]
@@ -132,9 +157,22 @@ def evaluate(root, output):
     ):
         raise ValueError("Frozen experiment identity mismatch")
     selected = frozen["selected"]
+    if (
+        not frozen["models"][selected]["cv"]["passed"]
+        or frozen["nested_mape_pct"] > 20.0
+    ):
+        raise ValueError("Selected calibration failed the control/nested CV gate")
     reports = {}
-    for name in ("aggregate", selected):
+    baseline = (
+        "dot_precision_aggregate"
+        if selected.startswith("dot_precision_")
+        else "aggregate"
+    )
+    for name in dict.fromkeys((baseline, selected)):
         model = frozen["models"][name]
+        if not model["cv"]["passed"]:
+            reports[name] = {"status": "rejected_control_cv", "cv": model["cv"]}
+            continue
         cases = []
         for case in manifest["splits"]["holdout"]:
             row = _read(root / "holdouts" / (case["id"] + ".json"))
@@ -192,8 +230,16 @@ def main(argv=None):
     parser.add_argument("stage", choices=("fit", "evaluate"))
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--dot-precision",
+        action="store_true",
+        help="Fit only precision-separated candidates; requires newly observed dot metadata",
+    )
     args = parser.parse_args(argv)
-    {"fit": fit, "evaluate": evaluate}[args.stage](args.root, args.output)
+    if args.stage == "fit":
+        fit(args.root, args.output, dot_precision=args.dot_precision)
+    else:
+        evaluate(args.root, args.output)
 
 
 if __name__ == "__main__":

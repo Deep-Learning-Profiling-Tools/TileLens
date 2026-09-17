@@ -1,0 +1,13 @@
+{
+  "schema": "triton-viz.gpu-dot-precision-controls.v1",
+  "role": "control",
+  "base_suite": "coverage",
+  "programs": [2, 8, 32, 192],
+  "repeats": [17, 65],
+  "precisions": [["float32", "ieee"], ["float32", "tf32"], ["bfloat16", "ieee"], ["float16", "ieee"]],
+  "bm": 128,
+  "bn": 128,
+  "bk": 64,
+  "num_warps": 8,
+  "num_stages": 1
+}

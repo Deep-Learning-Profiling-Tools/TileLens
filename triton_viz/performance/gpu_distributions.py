@@ -12,6 +12,7 @@ from collections import defaultdict
 import numpy as np
 
 from .gpu import FEATURES, _ALU, _REDUCE, _SFU
+from .gpu_dot_precision import DOT_FEATURES
 
 PROGRAM_FEATURES = (
     "program_alu_p90",
@@ -26,6 +27,19 @@ FEATURE_SETS = {
     "dependency_distribution": FEATURES + PATH_FEATURES,
     "combined_distribution": FEATURES + PROGRAM_FEATURES + PATH_FEATURES,
 }
+
+LEGACY_FEATURE_SETS = tuple(FEATURE_SETS)
+FEATURE_SETS["dot_precision_aggregate"] = (
+    tuple(k for k in FEATURES if k != "tensor_flops") + DOT_FEATURES[:4]
+)
+FEATURE_SETS["dot_precision_combined"] = (
+    tuple(
+        k
+        for k in FEATURE_SETS["combined_distribution"]
+        if k not in {"tensor_flops", "program_tensor_p90"}
+    )
+    + DOT_FEATURES
+)
 
 
 def distribution_features(source):

@@ -180,6 +180,18 @@ def predict(source, calibration, *, fingerprint, sm_count, strict=True):
         extra, distributions = distribution_features(source)
         work["features"].update(extra)
         work["distributions"] = distributions
+        if feature_set.startswith("dot_precision_"):
+            from .gpu_dot_precision import dot_features
+
+            dot_work, configurations, dot_reasons = dot_features(source)
+            work["features"].update(dot_work)
+            work["ood_reasons"].extend(dot_reasons)
+            work["dot_configurations"] = configurations
+            if any(
+                c not in calibration.get("dot_configurations", [])
+                for c in configurations
+            ):
+                work["ood_reasons"].append("uncovered_dot_precision_configuration")
     reasons = work["ood_reasons"][:]
     configuration = source_configuration(work)
     if configuration not in calibration.get("source_configurations", []):

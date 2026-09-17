@@ -150,6 +150,26 @@ class PerformanceTrace(Client):
             if not self.events or self.events[-1]["op"] != name:
                 return
             event = self.events[-1]
+            if name == "dot":
+
+                def operand(index, key):
+                    return args[index] if len(args) > index else kwargs.get(key)
+
+                event["dot_input_dtypes"] = [
+                    str(getattr(operand(i, key), "dtype", "unknown"))
+                    for i, key in enumerate(("a", "b"))
+                ]
+                event["dot_accumulator_dtype"] = str(
+                    getattr(operand(2, "d"), "dtype", "unknown")
+                )
+                precision = operand(3, "input_precision")
+                event["dot_input_precision"] = (
+                    str(getattr(precision, "name", precision))
+                    .lower()
+                    .rsplit(".", 1)[-1]
+                    if precision is not None
+                    else "unknown"
+                )
             dependencies = set(event["dependencies"])
             for value in (*args, *kwargs.values()):
                 array = self._array(value)
