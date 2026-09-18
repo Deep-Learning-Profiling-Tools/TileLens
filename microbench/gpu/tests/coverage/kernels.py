@@ -66,6 +66,10 @@ def _values(shape, dtype):
 
 
 def prepare(case, device):
+    if case["kind"] == "geometry_dot":
+        from .geometry import prepare as prepare_geometry
+
+        return prepare_geometry(case, device)
     if case["kind"] == "coverage_validation":
         from .validation import prepare as prepare_validation
 
@@ -96,6 +100,10 @@ def prepare(case, device):
 
 
 def check_output(case, output):
+    if case["kind"] == "geometry_dot":
+        from .geometry import check_output as check_geometry
+
+        return check_geometry(case, output)
     if case["kind"] == "coverage_validation":
         from .validation import check_output as check_validation
 

@@ -8,10 +8,47 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
 def load_cases(suite, role):
-    if suite not in {"pilot", "compositional", "coverage", "precision"}:
+    if suite not in {"pilot", "compositional", "coverage", "precision", "geometry"}:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "geometry":
+        # A diagnostic, control-only factorial experiment; no target declaration.
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "geometry_control.json").read_text())
+        if (data["schema"], data["role"]) != (
+            "triton-viz.gpu-dot-geometry-controls.v1",
+            "control",
+        ):
+            raise ValueError("Invalid dot geometry controls")
+        result = []
+        for p, (dtype, precision), (bm, bn, bk), reuse, stages in product(
+            data["programs"],
+            data["precisions"],
+            data["tiles"],
+            data["reuse"],
+            data["stages"],
+        ):
+            group = f"geometry_p{p}_{dtype}_{precision}_{bm}x{bn}x{bk}"
+            result.append(
+                dict(
+                    id=f"{group}_{reuse}_s{stages}",
+                    kind="geometry_dot",
+                    programs=p,
+                    dtype=dtype,
+                    precision=precision,
+                    bm=bm,
+                    bn=bn,
+                    bk=bk,
+                    reuse=reuse,
+                    num_stages=stages,
+                    repeat=data["repeat"],
+                    num_warps=data["num_warps"],
+                    cv_group=group,
+                )
+            )
+        return result
     if suite == "precision":
         base = load_cases("coverage", role)
         if role == "holdout":
