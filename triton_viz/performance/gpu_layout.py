@@ -44,6 +44,46 @@ def mma_v2_warp_layout(m, n, warps, *, chained_dot, compiler_version):
     return layout
 
 
+def mma_v2_fragments(m, n, k, warps, *, input_dtype, chained_dot, compiler_version):
+    """Fully materialized MMA-v2 fragment words, not physical register allocation.
+
+    Conditional on the chosen tensor path and verified static-region layout.
+    PTX m16n8k16 FP16/BF16 and m16n8k8 TF32 each use four A words,
+    two B words and four FP32 accumulator words per instruction tile.
+    A is replicated across N warps, B across M warps. Scheduling may shorten
+    live ranges; these counts do not assert simultaneous liveness or spills.
+    """
+    if input_dtype not in {"fp16", "bf16", "tf32"}:
+        raise ValueError("Require a supported MMA-v2 input precision")
+    wm, wn = mma_v2_warp_layout(
+        m, n, warps, chained_dot=chained_dot, compiler_version=compiler_version
+    )
+    instruction_k = 8 if input_dtype == "tf32" else 16
+    if (
+        isinstance(k, bool)
+        or not isinstance(k, int)
+        or k < instruction_k
+        or k & (k - 1)
+        or m < 16 * wm
+        or n < 8 * wn
+    ):
+        raise ValueError(
+            "Partial or broadcast instruction tiles require separate mapping"
+        )
+    mt, nt, kt = m // (16 * wm), n // (8 * wn), k // instruction_k
+    a, b, acc = 4 * mt * kt, 2 * nt * kt, 4 * mt * nt
+    return dict(
+        warp_layout=[wm, wn],
+        instruction_shape=[16, 8, instruction_k],
+        a_words_per_thread=a,
+        b_words_per_thread=b,
+        accumulator_words_per_thread=acc,
+        fully_materialized_words_per_thread=a + b + acc,
+        a_cross_warp_replication=wn,
+        b_cross_warp_replication=wm,
+    )
+
+
 def mma_v2_row_reduction(m, n, warps, *, chained_dot, compiler_version):
     """Static FP32 sum/max shuffle expansion for axis-1 MMA-v2 reduction.
 

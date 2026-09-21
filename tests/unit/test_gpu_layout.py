@@ -4,6 +4,73 @@ from triton_viz.performance.gpu_layout import initial_ieee_dot_layout
 from triton_viz.performance.gpu_layout import ieee_row_store_exchange
 
 
+@pytest.mark.parametrize("dtype,total", [("tf32", 448), ("fp16", 352), ("bf16", 352)])
+def test_mma_fragment_words_include_cross_warp_operand_replication(dtype, total):
+    from triton_viz.performance.gpu_layout import mma_v2_fragments
+
+    plan = mma_v2_fragments(
+        256, 128, 32, 4, input_dtype=dtype, chained_dot=False, compiler_version="3.7.0"
+    )
+    assert plan["warp_layout"] == [2, 2]
+    assert plan["accumulator_words_per_thread"] == 256
+    assert plan["fully_materialized_words_per_thread"] == total
+    bits = 32 if dtype == "tf32" else 16
+    assert (
+        plan["a_words_per_thread"] * 128
+        == 256 * 32 * bits // 32 * plan["a_cross_warp_replication"]
+    )
+    assert (
+        plan["b_words_per_thread"] * 128
+        == 128 * 32 * bits // 32 * plan["b_cross_warp_replication"]
+    )
+
+
+def test_mma_chain_layout_changes_operands_without_changing_accumulator_demand():
+    from triton_viz.performance.gpu_layout import mma_v2_fragments
+
+    plain = mma_v2_fragments(
+        64, 64, 32, 4, input_dtype="bf16", chained_dot=False, compiler_version="3.7.0"
+    )
+    chain = mma_v2_fragments(
+        64, 64, 32, 4, input_dtype="bf16", chained_dot=True, compiler_version="3.7.0"
+    )
+    assert (
+        plain["accumulator_words_per_thread"]
+        == chain["accumulator_words_per_thread"]
+        == 32
+    )
+    assert (plain["a_words_per_thread"], plain["b_words_per_thread"]) == (16, 16)
+    assert (chain["a_words_per_thread"], chain["b_words_per_thread"]) == (8, 32)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(k=8),
+        dict(k=True),
+        dict(k=31),
+        dict(k=32.0),
+        dict(input_dtype="fp32"),
+        dict(compiler_version="unknown"),
+        dict(m=16, n=8),
+    ],
+)
+def test_mma_fragments_reject_unverified_precision_tiles_and_policy(overrides):
+    from triton_viz.performance.gpu_layout import mma_v2_fragments
+
+    args = dict(
+        m=64,
+        n=64,
+        k=32,
+        warps=4,
+        input_dtype="fp16",
+        chained_dot=False,
+        compiler_version="3.7.0",
+    )
+    with pytest.raises(ValueError):
+        mma_v2_fragments(**(args | overrides))
+
+
 @pytest.mark.parametrize(
     "m,warps,shuffles,barriers",
     [
