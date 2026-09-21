@@ -1,7 +1,7 @@
 """Compare explicit tile-SDCM hypotheses with the fixed cache control matrix.
 
 No parameter selection or latency fitting. All associativity scenarios and all
-nine controls remain visible. The 1 KiB block divides both declared copy tile
+declared controls remain visible. The 1 KiB block divides both declared copy tile
 sizes; it is a source tile unit, not an assertion about L2 physical line size.
 """
 
@@ -12,6 +12,7 @@ from pathlib import Path
 
 from triton_viz.performance.gpu_cache import sdcm_hit_probability
 from triton_viz.tools.gpu_cost_model_pipeline import _write
+from microbench.gpu.common.cache_controls import cache_declaration
 
 
 def copy_range_accesses(working_set_bytes, eviction, *, l2_bytes, tile_bytes=1024):
@@ -48,7 +49,13 @@ def copy_range_accesses(working_set_bytes, eviction, *, l2_bytes, tile_bytes=102
 
 
 def copy_range_misses(
-    working_set_bytes, eviction, *, l2_bytes, associativity, tile_bytes=1024
+    working_set_bytes,
+    eviction,
+    *,
+    l2_bytes,
+    associativity,
+    tile_bytes=1024,
+    method="exact",
 ):
     """Closed-form load misses for the declared repeated copy sequence.
 
@@ -72,7 +79,7 @@ def copy_range_misses(
 
     def miss(d):
         return 1 - sdcm_hit_probability(
-            d, capacity_blocks=capacity, associativity=associativity
+            d, capacity_blocks=capacity, associativity=associativity, method=method
         )
 
     return blocks * (
@@ -89,15 +96,25 @@ def audit(counter_report, *, l2_bytes, associativities, tile_bytes=1024):
         raise ValueError("Require complete consistent control range counters")
     if not associativities or len(set(associativities)) != len(associativities):
         raise ValueError("Declare nonempty distinct associativity scenarios")
+    matrix = counter_report.get("matrix", "legacy")
+    declaration = cache_declaration(matrix)
     expected = {
-        (mib, eviction) for mib in (3, 12, 48) for eviction in ("none", "zero", "read")
+        (mib, eviction)
+        for mib in declaration["working_set_mib"]
+        for eviction in declaration["evictions"]
     }
     rows = counter_report["rows"]
     if (
-        len(rows) != 9
+        len(rows) != len(expected)
         or {(r["working_set_mib"], r["eviction"]) for r in rows} != expected
     ):
-        raise ValueError("Keep the exact declared nine-control matrix")
+        raise ValueError(
+            "Keep the exact declared nine-control matrix"
+            if matrix == "legacy"
+            else "Keep the exact declared capacity-control matrix"
+        )
+    if l2_bytes != declaration["l2_bytes"]:
+        raise ValueError("Counter and model hardware capacities must match")
     scenarios = []
     for ways in associativities:
         comparisons = []
@@ -133,6 +150,7 @@ def audit(counter_report, *, l2_bytes, associativities, tile_bytes=1024):
         )
     return dict(
         role="control",
+        matrix=matrix,
         eligible_for_fit=False,
         l2_bytes=l2_bytes,
         tile_bytes=tile_bytes,

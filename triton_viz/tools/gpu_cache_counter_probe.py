@@ -1,8 +1,9 @@
-"""Declared control-only cache experiment; run under ncu application replay.
+"""Declared control-only cache experiment; range replay is the verified path.
 
 No timing from this profiler run may enter latency calibration. Use ncu with
 --profile-from-start off --cache-control none --clock-control none and preserve
-the complete application setup on every replay pass.
+the complete application setup on every replay pass. Application-replay
+diagnostics on GB10 can stall; their failures remain separate artifacts.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import os
 
 import triton
 import triton.language as tl
+from microbench.gpu.common.cache_controls import cache_declaration
 
 
 @triton.jit
@@ -32,9 +34,8 @@ def cache_eviction_read(X, Y, N: tl.constexpr, BLOCK: tl.constexpr):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--working-set-mib", type=int, choices=(3, 12, 48), required=True
-    )
+    parser.add_argument("--working-set-mib", type=int, required=True)
+    parser.add_argument("--matrix", choices=("legacy", "capacity"), default="legacy")
     parser.add_argument("--eviction", choices=("none", "zero", "read"), required=True)
     parser.add_argument(
         "--block",
@@ -50,6 +51,9 @@ def main(argv=None):
         help="Diagnostic variant: host-sync between priming launches",
     )
     args = parser.parse_args(argv)
+    declaration = cache_declaration(args.matrix)
+    if args.working_set_mib not in declaration["working_set_mib"]:
+        raise ValueError("Working set is outside the declared control matrix")
 
     import torch
     from microbench.gpu.harness.measure import assert_available, snapshot
@@ -69,6 +73,10 @@ def main(argv=None):
     l2 = ctypes.c_int()
     if driver.cuDeviceGetAttribute(ctypes.byref(l2), 38, 0) or l2.value <= 0:
         raise RuntimeError("Cannot query L2 capacity")
+    if args.matrix == "capacity" and l2.value != declaration["l2_bytes"]:
+        raise ValueError(
+            "Capacity-neighborhood controls require the declared hardware L2 size"
+        )
     sweep = torch.empty(2 * l2.value, dtype=torch.uint8, device="cuda")
     sweep_out = torch.empty_like(sweep) if args.eviction == "read" else None
     # Compile all control launches before constructing the measured cache state.

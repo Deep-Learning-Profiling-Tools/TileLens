@@ -9,6 +9,7 @@ import io
 from pathlib import Path
 
 from triton_viz.tools.gpu_cost_model_pipeline import _write
+from microbench.gpu.common.cache_controls import cache_declaration
 
 METRICS = {
     "lts__t_sectors_op_read.sum": "reads",
@@ -55,13 +56,19 @@ def parse_counters(text, *, range_mode=False):
     return [launches[index] for index in sorted(expected_ids)]
 
 
-def audit_ranges(root):
+def audit_ranges(root, matrix="legacy"):
+    declaration = cache_declaration(matrix)
     rows = []
-    for mib in (3, 12, 48):
-        for eviction in ("none", "zero", "read"):
+    for mib in declaration["working_set_mib"]:
+        for eviction in declaration["evictions"]:
             path = root / f"{mib}_{eviction}.csv"
             log = path.with_suffix(".log")
-            record = dict(working_set_mib=mib, eviction=eviction, path=str(path))
+            record = dict(
+                working_set_mib=mib,
+                eviction=eviction,
+                path=str(path),
+                cv_group=f"cache_capacity_mib{mib}",
+            )
             try:
                 text = path.read_text()
                 counters = parse_counters(text, range_mode=True)[0]
@@ -89,6 +96,8 @@ def audit_ranges(root):
     return dict(
         schema="triton-viz.gpu-cache-range-audit.v1",
         role="control",
+        matrix=matrix,
+        declaration=declaration,
         rows=rows,
         complete=complete,
         replay_counts_consistent=bool(reliable),
@@ -190,10 +199,15 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--range-mode", action="store_true")
+    parser.add_argument("--matrix", choices=("legacy", "capacity"), default="legacy")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh audit path")
-    report = audit_ranges(args.root) if args.range_mode else audit(args.root)
+    if args.matrix != "legacy" and not args.range_mode:
+        raise ValueError("Capacity controls require the declared range protocol")
+    report = (
+        audit_ranges(args.root, args.matrix) if args.range_mode else audit(args.root)
+    )
     _write(args.output, report)
     print(
         {

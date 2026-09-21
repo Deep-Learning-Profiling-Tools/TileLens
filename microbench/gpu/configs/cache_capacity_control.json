@@ -1,0 +1,12 @@
+{
+  "schema": "triton-viz.gpu-cache-capacity-controls.v1",
+  "role": "control",
+  "l2_bytes": 25165824,
+  "working_set_mib": [3, 6, 9, 12, 15, 18, 24, 36, 48],
+  "evictions": ["none", "zero", "read"],
+  "block_elements": 1024,
+  "launches": 3,
+  "counter_sector_bytes": 32,
+  "associativity_candidates": [1, 2, 4, 8, 16, 32],
+  "probability_methods": ["exact", "gaussian"]
+}
