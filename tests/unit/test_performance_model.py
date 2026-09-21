@@ -107,3 +107,10 @@ def test_shared_machine_audit_rejects_foreign_or_unattributed_load():
 
 def test_digest_is_order_independent():
     assert stable_digest({"a": 1, "b": 2}) == stable_digest({"b": 2, "a": 1})
+
+
+def test_diagnostic_control_cannot_bypass_admission_with_a_valid_fingerprint():
+    rows = _controls()
+    rows[0]["eligible_for_fit"] = False
+    with pytest.raises(ValueError, match="diagnostic-only"):
+        fit_controls(rows, ("launch", "bytes"), fingerprint="test")

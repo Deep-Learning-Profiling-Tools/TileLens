@@ -52,6 +52,11 @@ def fit_controls(rows, feature_names, *, fingerprint, gate_pct=20.0):
     """
     if not rows or any(row.get("role") != "control" for row in rows):
         raise ValueError("Calibration accepts control rows only")
+    if any(
+        "eligible_for_fit" in row and row["eligible_for_fit"] is not True
+        for row in rows
+    ):
+        raise ValueError("Calibration refuses diagnostic-only or unvalidated controls")
     if any(row.get("contaminated", True) for row in rows):
         raise ValueError("Calibration refuses contaminated or unaudited measurements")
     if any(row.get("fingerprint") != fingerprint for row in rows):
