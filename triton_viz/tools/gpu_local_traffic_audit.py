@@ -15,7 +15,7 @@ from triton_viz.tools.gpu_control_resource_audit import sass_backedges
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
-def account(row, *, loop_trips):
+def account(row, *, loop_trips, predicate_bounds=False):
     if row.get("role") != "control":
         raise ValueError("Only control compiler artifacts may be audited")
     if (
@@ -34,6 +34,7 @@ def account(row, *, loop_trips):
     if region is None and loop_trips != 1:
         raise ValueError("Straight-line SASS executes once, not source repeat times")
     totals = {scope: {op: 0 for op in ("LDL", "STL")} for scope in ("loop", "outside")}
+    predicated = {scope: {op: 0 for op in ("LDL", "STL")} for scope in totals}
     for line in sass.splitlines():
         match = re.search(
             r"/\*([0-9a-fA-F]+)\*/\s+(?:(@!?U?P\w+)\s+)?"
@@ -56,7 +57,7 @@ def account(row, *, loop_trips):
                 raise ValueError("Additional branch requires path-sensitive accounting")
         if base not in {"LDL", "STL"}:
             continue
-        if predicate:
+        if predicate and not predicate_bounds:
             raise ValueError("Predicated local accesses require active-lane evidence")
         suffixes = opcode.split(".")[1:]
         if set(suffixes) - {"LU", "64", "128"} or {"64", "128"} <= set(suffixes):
@@ -67,7 +68,7 @@ def account(row, *, loop_trips):
             if region is not None and region["start_pc"] <= pc <= region["branch_pc"]
             else "outside"
         )
-        totals[scope][base] += width
+        (predicated if predicate else totals)[scope][base] += width
     case = row["case"]
     programs, warps = case["programs"], case["num_warps"]
     if any(
@@ -79,7 +80,7 @@ def account(row, *, loop_trips):
         op: totals["outside"][op] + loop_trips * totals["loop"][op]
         for op in ("LDL", "STL")
     }
-    return dict(
+    result = dict(
         role="control",
         case=case,
         sass_sha256=row["artifact_sha256"]["sass"],
@@ -93,6 +94,30 @@ def account(row, *, loop_trips):
         eligible_for_fit=False,
         caveat="Conditional full-lane payload accounting; validate loop trips, local layout and counters independently. Not source-only prediction or DRAM traffic.",
     )
+    if predicate_bounds:
+        uncertain = {
+            op: predicated["outside"][op] + loop_trips * predicated["loop"][op]
+            for op in dynamic
+        }
+        # Do not expose lower bounds through the exact-accounting field names.
+        del result["conditional_bytes_per_thread"]
+        del result["conditional_payload_sector_equivalents"]
+        result.update(
+            accounting="predicate_bounds",
+            static_predicated_bytes_per_thread=predicated,
+            conditional_bytes_per_thread_bounds={
+                op: [value, value + uncertain[op]] for op, value in dynamic.items()
+            },
+            conditional_payload_sector_equivalent_bounds={
+                op: [
+                    value * programs * warps,
+                    (value + uncertain[op]) * programs * warps,
+                ]
+                for op, value in dynamic.items()
+            },
+            caveat="Conditional payload bounds: predicated accesses may have zero through all lanes active. Loop trips, other active lanes and layout remain assumptions. Not cache transactions, misses, latency or source-only inference.",
+        )
+    return result
 
 
 def main(argv=None):
@@ -100,12 +125,17 @@ def main(argv=None):
     parser.add_argument("--control", type=Path, required=True)
     parser.add_argument("--loop-trips", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--predicate-bounds", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh audit output")
     _write(
         args.output,
-        account(json.loads(args.control.read_text()), loop_trips=args.loop_trips),
+        account(
+            json.loads(args.control.read_text()),
+            loop_trips=args.loop_trips,
+            predicate_bounds=args.predicate_bounds,
+        ),
     )
 
 

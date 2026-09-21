@@ -38,6 +38,34 @@ def test_widths_and_loop_trips_determine_conditional_payload():
     assert not result["eligible_for_fit"]
 
 
+def test_predicate_bounds_separate_loop_and_outside_without_exact_value_claim():
+    sass = SASS.replace("LDL.LU.64", "@!P0 LDL.LU.64").replace("STL.64", "@UP1 STL.64")
+    result = account(row(sass), loop_trips=5, predicate_bounds=True)
+    assert result["conditional_bytes_per_thread_bounds"] == {
+        "LDL": [4, 44],
+        "STL": [20, 28],
+    }
+    assert result["conditional_payload_sector_equivalent_bounds"] == {
+        "LDL": [4 * 192, 44 * 192],
+        "STL": [20 * 192, 28 * 192],
+    }
+    assert "conditional_bytes_per_thread" not in result
+    assert "conditional_payload_sector_equivalents" not in result
+    assert not result["eligible_for_fit"]
+    with pytest.raises(ValueError, match="active-lane"):
+        account(row(sass), loop_trips=5)
+
+
+def test_no_predicate_bounds_collapse_to_existing_conditional_accounting():
+    exact = account(row(), loop_trips=5)
+    bounds = account(row(), loop_trips=5, predicate_bounds=True)
+    for op, value in exact["conditional_payload_sector_equivalents"].items():
+        assert bounds["conditional_payload_sector_equivalent_bounds"][op] == [
+            value,
+            value,
+        ]
+
+
 def test_straight_line_unrolled_code_counts_once():
     r = row(SASS.replace("BRA.U UP0, 0x20", "BRA 0x40"))
     result = account(r, loop_trips=1)
@@ -61,17 +89,21 @@ def test_straight_line_unrolled_code_counts_once():
 def test_unsupported_paths_do_not_silently_price(sass):
     with pytest.raises(ValueError):
         account(row(sass), loop_trips=5)
+    if "@P0" not in sass:
+        with pytest.raises(ValueError):
+            account(row(sass), loop_trips=5, predicate_bounds=True)
 
 
-def test_rejects_target_artifact_and_changed_digest():
+@pytest.mark.parametrize("predicate_bounds", [False, True])
+def test_rejects_target_artifact_and_changed_digest(predicate_bounds):
     r = row()
     r["role"] = "holdout"
     with pytest.raises(ValueError, match="Only control"):
-        account(r, loop_trips=5)
+        account(r, loop_trips=5, predicate_bounds=predicate_bounds)
     r = row()
     r["artifact_sha256"]["sass"] = "wrong"
     with pytest.raises(ValueError, match="fingerprint"):
-        account(r, loop_trips=5)
+        account(r, loop_trips=5, predicate_bounds=predicate_bounds)
 
 
 @pytest.mark.parametrize("trips", [True, 0, -1, 1.5])
