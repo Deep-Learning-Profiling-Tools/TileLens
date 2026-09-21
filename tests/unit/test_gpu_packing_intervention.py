@@ -11,7 +11,63 @@ from triton_viz.tools.gpu_packing_intervention import (
     variants,
     unroll_control_loop,
     disable_backend_unroll,
+    synchronous_control_copies,
 )
+
+
+def async_ptx():
+    return """mov.b32 %r7, 16;
+cp.async.cg.shared.global [ %r28 + 0 ], [ %rd11 + 0 ], 0x10, %r7;
+cp.async.commit_group;
+cp.async.wait_group 0;
+bar.sync 0;
+selp.b32 %r8, 0, 16, %p1;
+cp.async.cg.shared.global [ %r29 + 0 ], [ %rd12 + 0 ], 0x10, %r8;
+cp.async.commit_group;
+cp.async.wait_group 0;
+bar.sync 0;
+"""
+
+
+def test_sync_copy_keeps_barriers_and_zero_fill_without_reading_masked_address():
+    result, count = synchronous_control_copies(async_ptx())
+    assert count == 2 and "cp.async" not in result
+    assert result.count("bar.sync 0;") == 2
+    assert result.count("@%tv_sync_full ld.global.cg.v4.b32") == 2
+    assert result.count("st.shared.v4.b32") == 2
+    assert result.count("mov.b32 %tv_sync0, 0;") == 2
+    assert "setp.eq.u32 %tv_sync_full, %r8, 16;" in result
+    assert result.index("mov.b32 %tv_sync3, 0;") < result.index("ld.global.cg")
+    row = dict(
+        role="control",
+        case=dict(kind="geometry_dot", num_stages=2),
+        artifacts=dict(ptx=async_ptx()),
+        artifact_sha256=dict(ptx=hashlib.sha256(async_ptx().encode()).hexdigest()),
+    )
+    assert variants(row, "sync_copy") == (
+        {"original": async_ptx(), "sync_copy": result},
+        2,
+    )
+    row["case"]["num_stages"] = 1
+    with pytest.raises(ValueError, match="stage-2"):
+        variants(row, "sync_copy")
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("0x10", "0x8"),
+        ("mov.b32 %r7, 16;", "mov.b32 %r7, 8;"),
+        ("mov.b32 %r7, 16;", "@%p0 mov.b32 %r7, 16;"),
+        ("wait_group 0", "wait_group 1"),
+        ("cp.async.cg", "@%p0 cp.async.cg"),
+        ("cp.async.cg", "cp.async.ca"),
+        ("bar.sync 0;", ".reg .b32 %tv_sync<4>;"),
+    ],
+)
+def test_sync_copy_rejects_unverified_forms(old, new):
+    with pytest.raises(ValueError):
+        synchronous_control_copies(async_ptx().replace(old, new))
 
 
 def test_nounroll_is_module_scoped_and_changes_only_the_directive():
@@ -188,7 +244,8 @@ def test_target_and_modified_artifacts_rejected():
 
 
 @pytest.mark.parametrize(
-    "mode,all_declared", [("fma", False), ("nounroll", False), ("nounroll", True)]
+    "mode,all_declared",
+    [("fma", False), ("nounroll", False), ("nounroll", True), ("sync_copy", True)],
 )
 def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
     tmp_path, monkeypatch, mode, all_declared
@@ -212,9 +269,11 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
             )
         ]
     if all_declared:
-        cases = [dict(id="independent_control", kind="geometry_dot")]
+        cases = [dict(id="independent_control", kind="geometry_dot", num_stages=2)]
     (root / "manifest.json").write_text(json.dumps(dict(role="control", cases=cases)))
     ptx = ".target sm_121a\n.address_size 64\nfma.rn.f32x2 %rd0, %rd1, %rd2, %rd0;\n"
+    if mode == "sync_copy":
+        ptx = ".target sm_121a\n.address_size 64\n" + async_ptx()
     for case in cases:
         row = dict(
             role="control",
@@ -263,12 +322,13 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
     assert manifest["intervention"] == mode
     assert manifest["all_declared_controls"] == all_declared
     assert manifest["cases"] == cases
-    variant = "nounroll" if mode == "nounroll" else "scalar_fma"
+    variant = "scalar_fma" if mode == "fma" else mode
     changed_report = json.loads(
         (output / cases[0]["id"] / (variant + ".json")).read_text()
     )
     assert changed_report["nounroll_directives"] == int(mode == "nounroll")
     assert changed_report["rewritten_fmas"] == int(mode == "fma")
+    assert changed_report["synchronous_copies"] == (2 if mode == "sync_copy" else 0)
     original_path = root / "controls" / (cases[0]["id"] + ".json")
     changed = json.loads(original_path.read_text())
     changed["cubin_sha256"] = "different baseline"

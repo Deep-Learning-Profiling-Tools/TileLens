@@ -205,14 +205,86 @@ def disable_backend_unroll(ptx):
     return ptx[:offset] + '\n.pragma "nounroll";\n' + ptx[offset:]
 
 
+def synchronous_control_copies(ptx):
+    """Offline 16-byte copy contrast, not a general async-program rewrite.
+
+    Preserve zero filling for the verified 0/16 source-size vocabulary. All
+    CTA barriers remain. Extra temporary registers and synchronous issue may
+    change allocation; this contrast does not isolate a hardware instruction
+    cost. GPU numerical validation is still required for every variant.
+    """
+    if "%tv_sync" in ptx:
+        raise ValueError("Intervention register namespace already present")
+    copy = re.compile(
+        r"cp\.async\.cg\.shared\.global\s+"
+        r"(\[\s*%r\d+\s*\+\s*0\s*\]),\s*"
+        r"(\[\s*%rd\d+\s*\+\s*0\s*\]),\s*0x10,\s*(%r\d+);"
+    )
+    lines = ptx.splitlines()
+    copies = [copy.fullmatch(line.strip()) for line in lines if "cp.async.cg" in line]
+    if not copies or not all(copies):
+        raise ValueError("Require unpredicated 16-byte cg control copies")
+    for size in {match[3] for match in copies}:
+        definitions = [
+            line.strip()
+            for line in lines
+            if re.search(r"\s" + re.escape(size) + r"\s*,", line)
+        ]
+        allowed = re.compile(
+            r"(?:mov\.b32\s+" + re.escape(size) + r",\s*16;|"
+            r"selp\.b32\s+" + re.escape(size) + r",\s*0,\s*16,\s*%p\d+;)"
+        )
+        if not definitions or any(not allowed.fullmatch(line) for line in definitions):
+            raise ValueError("Require checked 0/16 source-size definitions")
+    output, count = [], 0
+    for line in lines:
+        if "cp.async" not in line:
+            output.append(line)
+            continue
+        instruction = line.strip()
+        match = copy.fullmatch(instruction)
+        if match:
+            shared, global_address, size = match.groups()
+            output.extend(
+                [
+                    "{",
+                    ".reg .b32 %tv_sync<4>;",
+                    ".reg .pred %tv_sync_full;",
+                    *[f"mov.b32 %tv_sync{i}, 0;" for i in range(4)],
+                    f"setp.eq.u32 %tv_sync_full, {size}, 16;",
+                    "@%tv_sync_full ld.global.cg.v4.b32 "
+                    "{%tv_sync0, %tv_sync1, %tv_sync2, %tv_sync3}, "
+                    + global_address
+                    + ";",
+                    f"st.shared.v4.b32 {shared}, "
+                    "{%tv_sync0, %tv_sync1, %tv_sync2, %tv_sync3};",
+                    "}",
+                ]
+            )
+            count += 1
+        elif re.fullmatch(r"cp\.async\.(?:commit_group;|wait_group\s+0;)", instruction):
+            output.append("// synchronous control copy: no outstanding group")
+        else:
+            raise ValueError("Unsupported async operation or wait depth")
+    return "\n".join(output) + "\n", count
+
+
 def variants(row, mode="fma"):
     if row.get("role") != "control":
         raise ValueError("Only declared control artifacts may be transformed")
     ptx = row["artifacts"]["ptx"]
     if hashlib.sha256(ptx.encode()).hexdigest() != row["artifact_sha256"]["ptx"]:
         raise ValueError("Control PTX digest mismatch")
-    if mode not in {"fma", "value_pairs", "unroll", "nounroll"}:
+    if mode not in {"fma", "value_pairs", "unroll", "nounroll", "sync_copy"}:
         raise ValueError("Unknown intervention")
+    if mode == "sync_copy":
+        if (
+            row["case"].get("kind") != "geometry_dot"
+            or row["case"].get("num_stages") != 2
+        ):
+            raise ValueError("Require declared stage-2 pure-dot controls")
+        rewritten, count = synchronous_control_copies(ptx)
+        return {"original": ptx, "sync_copy": rewritten}, count
     if mode == "nounroll":
         return {"original": ptx, "nounroll": disable_backend_unroll(ptx)}, 1
     if mode == "unroll":
@@ -230,16 +302,22 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--regalloc-opt-level", type=int, choices=(0, 1, 2))
     parser.add_argument(
-        "--mode", choices=("fma", "value_pairs", "unroll", "nounroll"), default="fma"
+        "--mode",
+        choices=("fma", "value_pairs", "unroll", "nounroll", "sync_copy"),
+        default="fma",
     )
     parser.add_argument(
         "--all-declared-controls",
         action="store_true",
-        help="Apply nounroll to the entire declared geometry-dot control manifest",
+        help="Apply nounroll or sync_copy to the entire declared geometry-dot manifest",
     )
     args = parser.parse_args(argv)
-    if args.all_declared_controls and args.mode != "nounroll":
-        raise ValueError("Full-manifest intervention currently requires nounroll")
+    if args.all_declared_controls and args.mode not in {"nounroll", "sync_copy"}:
+        raise ValueError(
+            "Full-manifest intervention currently requires nounroll or sync_copy"
+        )
+    if args.mode == "sync_copy" and not args.all_declared_controls:
+        raise ValueError("sync_copy requires the entire declared control manifest")
     if args.output.exists():
         raise ValueError("Use a fresh experiment directory")
     manifest = json.loads((args.resource_root / "manifest.json").read_text())
@@ -265,7 +343,7 @@ def main(argv=None):
     if args.all_declared_controls:
         if any(c.get("kind") != "geometry_dot" for c in cases.values()):
             raise ValueError(
-                "Full-manifest nounroll requires pure geometry-dot controls"
+                "Full-manifest intervention requires pure geometry-dot controls"
             )
         ids = list(cases)
     if not set(ids) <= set(cases):
@@ -286,6 +364,11 @@ def main(argv=None):
             eligible_for_fit=False,
             gpu_execution=False,
             require_archived_baseline=True,
+            intervention_caveat=(
+                "Synchronous copies alter issue and register lifetimes; not an isolated instruction-cost measurement. GPU numerical validation required."
+                if args.mode == "sync_copy"
+                else "Offline compiler contrast; GPU numerical validation required."
+            ),
         ),
     )
     for identity in ids:
@@ -351,6 +434,7 @@ def main(argv=None):
                     else 0,
                     unrolled_trips=count if name == "unrolled" else 0,
                     nounroll_directives=count if name == "nounroll" else 0,
+                    synchronous_copies=count if name == "sync_copy" else 0,
                     command=command,
                     ptx_sha256=hashlib.sha256(ptx.encode()).hexdigest(),
                     cubin_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
