@@ -6,6 +6,52 @@ import pytest
 from triton_viz.tools.gpu_control_resource_audit import audit, sass_backedges
 
 
+def test_unlaunchable_controls_are_retained_without_fabricated_labels(tmp_path):
+    from triton.runtime.errors import OutOfResources
+    from triton_viz.tools.gpu_control_resources import load_resource_labels
+
+    class Compiled:
+        def _init_handles(self):
+            raise OutOfResources(131072, 101376, "shared memory")
+
+    labels = load_resource_labels(Compiled())
+    assert labels["launch_status"] == "out_of_resources"
+    assert labels["local_bytes_per_thread"] is None
+    case = dict(id="too_large")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(dict(role="control", cases=[case]))
+    )
+    (tmp_path / "controls").mkdir()
+    row = dict(
+        role="control",
+        case=case,
+        shared_bytes=131072,
+        artifacts={"ptx": "compiled"},
+        artifact_sha256={"ptx": hashlib.sha256(b"compiled").hexdigest()},
+        **labels,
+    )
+    path = tmp_path / "controls" / "too_large.json"
+    path.write_text(json.dumps(row))
+    report = audit(tmp_path)
+    assert report["count"] == 1 and not report["complete"]
+    assert report["rows"][0]["status"] == "out_of_resources"
+    row["registers_per_thread"] = 0
+    path.write_text(json.dumps(row))
+    with pytest.raises(ValueError, match="fabricate"):
+        audit(tmp_path)
+
+
+def test_resource_loader_does_not_hide_unrelated_runtime_failures():
+    from triton_viz.tools.gpu_control_resources import load_resource_labels
+
+    class Compiled:
+        def _init_handles(self):
+            raise RuntimeError("broken driver")
+
+    with pytest.raises(RuntimeError, match="broken driver"):
+        load_resource_labels(Compiled())
+
+
 def test_pinned_local_allocation_decoder_preserves_units_and_checks_agreement():
     from triton_viz.tools.gpu_control_resource_audit import decode_local_allocation
 

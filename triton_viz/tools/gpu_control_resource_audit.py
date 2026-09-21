@@ -165,6 +165,28 @@ def audit(root):
                 != row["artifact_sha256"][name]
             ):
                 raise ValueError("Compiler artifact digest mismatch")
+        if row.get("launch_status") == "out_of_resources":
+            if not row.get("launch_error") or any(
+                row.get(key) is not None
+                for key in (
+                    "registers_per_thread",
+                    "triton_reported_spills",
+                    "local_bytes_per_thread",
+                )
+            ):
+                raise ValueError(
+                    "Unlaunchable control must not fabricate resource labels"
+                )
+            rows.append(
+                dict(
+                    case=case,
+                    status="out_of_resources",
+                    reason=row["launch_error"],
+                    shared_bytes=row["shared_bytes"],
+                    artifact_sha256=row["artifact_sha256"],
+                )
+            )
+            continue
         ptx = row["artifacts"].get("ptx", "")
         sass = row["artifacts"].get("sass")
         sass_counts = (

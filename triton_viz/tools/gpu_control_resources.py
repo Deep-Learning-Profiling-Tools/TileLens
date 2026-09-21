@@ -18,6 +18,29 @@ from microbench.gpu.common.cases import load_cases
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
+def load_resource_labels(compiled):
+    """Keep unlaunchable controls explicit without inventing driver labels."""
+    from triton.runtime.errors import OutOfResources
+
+    try:
+        compiled._init_handles()
+    except OutOfResources as exc:
+        return dict(
+            launch_status="out_of_resources",
+            launch_error=str(exc),
+            registers_per_thread=None,
+            triton_reported_spills=None,
+            local_bytes_per_thread=None,
+        )
+    return dict(
+        launch_status="loadable",
+        launch_error=None,
+        registers_per_thread=compiled.n_regs,
+        triton_reported_spills=compiled.n_spills,
+        local_bytes_per_thread=4 * compiled.n_spills,
+    )
+
+
 def selected_controls(suite):
     if suite not in {
         "geometry",
@@ -93,7 +116,7 @@ def main(argv=None):
             for key, value in (("num_warps", 4), ("num_stages", 2))
         }
         compiled = kernel.warmup(*inputs, grid=grid, **options)
-        compiled._init_handles()
+        labels = load_resource_labels(compiled)
         artifacts = {
             name: compiled.asm[name]
             for name in ("ptx", "ttgir", "llir")
@@ -118,9 +141,7 @@ def main(argv=None):
             role="control",
             case=case,
             kernel_name=compiled.name,
-            registers_per_thread=compiled.n_regs,
-            triton_reported_spills=compiled.n_spills,
-            local_bytes_per_thread=4 * compiled.n_spills,
+            **labels,
             shared_bytes=compiled.metadata.shared,
             num_warps=compiled.metadata.num_warps,
             artifacts=artifacts,
