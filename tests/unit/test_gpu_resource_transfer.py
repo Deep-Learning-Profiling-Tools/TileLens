@@ -6,6 +6,31 @@ from microbench.gpu.common.cases import load_cases
 from triton_viz.tools.gpu_resource_transfer_audit import FEATURES, audit, train, predict
 
 
+def test_layout_descriptors_ignore_labels_and_mark_tensor_gap():
+    from triton_viz.tools.gpu_resource_transfer_audit import layout_features
+
+    row = dict(
+        source_features=dict(threads_per_program=128),
+        source_liveness={},
+        program_count=48,
+        operation_counts=dict(dot=48),
+        dot_shapes=[[[64, 64], [64, 64]]],
+        source_precision=[["fp32", "fp32", "ieee"]],
+        local_bytes_per_thread=object(),
+        registers_per_thread=object(),
+        median_us=object(),
+    )
+    features = layout_features(row, compiler_version="3.7.0")
+    assert features["max_simt_operand_fragment_words"] == 768
+    assert features["simt_layout_available"] == 1
+    row["source_precision"] = [["fp16", "fp16", "ieee"]]
+    features = layout_features(row, compiler_version="3.7.0")
+    assert features["simt_layout_available"] == 0
+    assert features["max_simt_operand_fragment_words"] == 0
+    with pytest.raises(ValueError, match="version"):
+        layout_features(row, compiler_version="unknown")
+
+
 def report():
     return dict(
         role="control",
@@ -34,6 +59,26 @@ def test_fold_training_excludes_entire_validation_geometry():
     modified["rows"][0]["local_bytes_per_thread"] = 100000
     modified["rows"][0]["median_us"] = object()  # Never inspect latency.
     assert audit(modified)["rows"][0]["prediction"] == result["rows"][0]["prediction"]
+
+
+def test_layout_fold_prediction_cannot_read_its_validation_allocation():
+    data = report()
+    data["compiler_version"] = "3.7.0"
+    for n, row in enumerate(data["rows"]):
+        row.update(
+            program_count=1,
+            operation_counts=dict(dot=1),
+            source_liveness=dict(logical_live_float_words_per_thread=64),
+            dot_shapes=[[[32 * 2**n, 32], [32, 64]]],
+            source_precision=[["fp32", "fp32", "ieee"]],
+        )
+        row["source_features"]["threads_per_program"] = 128
+    first = audit(data, feature_set="initial_layout")
+    data["rows"][0]["local_bytes_per_thread"] = 1000000
+    data["rows"][0]["median_us"] = object()
+    second = audit(data, feature_set="initial_layout")
+    assert first["rows"][0]["prediction"] == second["rows"][0]["prediction"]
+    assert "case0" not in first["rows"][0]["training_ids"]
 
 
 def test_holdout_and_incomplete_rejected():

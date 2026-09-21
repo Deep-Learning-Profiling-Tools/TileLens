@@ -35,6 +35,47 @@ FEATURE_SETS = {
         "max_dot_k",
     ),
 }
+FEATURE_SETS["initial_layout"] = FEATURE_SETS["live_structure"] + (
+    "simt_layout_available",
+    "max_simt_accumulator_fragment_words",
+    "max_simt_operand_fragment_words",
+)
+
+
+def layout_features(row, *, compiler_version):
+    """Add source-derived replication demand, never allocation labels."""
+    from triton_viz.performance.gpu_layout import initial_ieee_dot_layout
+
+    features = structural_features(row)
+    if compiler_version != "3.7.0":
+        raise ValueError("Unvalidated compiler layout policy version")
+    supported = row["source_precision"] == [["fp32", "fp32", "ieee"]]
+    fragments = []
+    if supported:
+        threads = features["threads_per_program"]
+        if threads % 32:
+            raise ValueError("Nonintegral source warp count")
+        for a, b in row["dot_shapes"]:
+            fragments.append(
+                initial_ieee_dot_layout(
+                    a[0],
+                    b[1],
+                    a[1],
+                    int(threads // 32),
+                    compiler_version=compiler_version,
+                )
+            )
+    return {
+        **features,
+        "simt_layout_available": int(supported),
+        "max_simt_accumulator_fragment_words": max(
+            (f["accumulator_words_per_thread"] for f in fragments), default=0
+        ),
+        "max_simt_operand_fragment_words": max(
+            (f["fully_materialized_operand_words_per_thread"] for f in fragments),
+            default=0,
+        ),
+    }
 
 
 def structural_features(row):
@@ -94,7 +135,13 @@ def join_control_sources(source_root, resource_root):
         ):
             raise ValueError("Unverified or mismatched source control")
         rows.append({**source, **{key: resource[key] for key in LABELS}})
-    return dict(role="control", complete=True, rows=rows)
+    compiler_manifest = json.loads((resource_root / "manifest.json").read_text())
+    return dict(
+        role="control",
+        complete=True,
+        rows=rows,
+        compiler_version=compiler_manifest.get("packages", {}).get("triton"),
+    )
 
 
 def descriptor_collisions(rows):
@@ -236,6 +283,11 @@ def audit(report, *, feature_set="base"):
     if feature_set == "live_structure":
         for row, original in zip(rows, report["rows"]):
             row["source_features"] = structural_features(original)
+    if feature_set == "initial_layout":
+        for row, original in zip(rows, report["rows"]):
+            row["source_features"] = layout_features(
+                original, compiler_version=report.get("compiler_version")
+            )
     groups = sorted({r["case"]["cv_group"] for r in rows})
     if len(groups) < 3 or len({r["case"]["id"] for r in rows}) != len(rows):
         raise ValueError("Need unique controls in at least three geometry groups")
