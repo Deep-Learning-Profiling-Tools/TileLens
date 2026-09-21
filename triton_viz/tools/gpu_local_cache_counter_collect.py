@@ -21,6 +21,11 @@ METRICS = (
     "lts__t_sectors_op_read_lookup_hit.sum",
     "lts__t_sectors_op_read_lookup_miss.sum",
 )
+LOCAL_LOOKUP_METRICS = tuple(
+    f"l1tex__t_sectors_pipe_lsu_mem_local_op_{op}_lookup_{outcome}.sum"
+    for op in ("ld", "st")
+    for outcome in ("hit", "miss")
+)
 
 
 def footprint_grid():
@@ -32,7 +37,8 @@ def footprint_grid():
     ]
 
 
-def parse_counters(text):
+def parse_counters(text, *, local_lookups=False):
+    expected_metrics = METRICS + LOCAL_LOOKUP_METRICS if local_lookups else METRICS
     lines = text.splitlines()
     start = next((i for i, line in enumerate(lines) if line.startswith('"ID",')), None)
     if start is None:
@@ -43,7 +49,7 @@ def parse_counters(text):
         if (
             row["ID"] != "0"
             or "perturbation_body" not in row["Kernel Name"]
-            or name not in METRICS
+            or name not in expected_metrics
             or name in values
         ):
             raise ValueError("Unexpected launch, kernel or metric")
@@ -53,13 +59,27 @@ def parse_counters(text):
         if row["Metric Unit"] != ("%" if name.endswith(".pct") else "sector"):
             raise ValueError("Unexpected counter unit")
         values[name] = value
-    if set(values) != set(METRICS) or values[METRICS[2]] > 100:
+    if set(values) != set(expected_metrics) or values[METRICS[2]] > 100:
         raise ValueError("Incomplete or invalid counter set")
     reads, hits, misses = (values[k] for k in METRICS[3:])
     if reads <= 0 or hits + misses <= 0:
         raise ValueError("Empty L2 measurement")
+    lookup = {}
+    if local_lookups:
+        for index, op in enumerate(("load", "store")):
+            hit, miss = (
+                values[k] for k in LOCAL_LOOKUP_METRICS[2 * index : 2 * index + 2]
+            )
+            total = values[METRICS[index]]
+            if hit + miss <= 0 or total <= 0:
+                raise ValueError("Empty local lookup measurement")
+            lookup[op] = dict(
+                hit_fraction=hit / (hit + miss),
+                replay_count_disagreement=abs(total - hit - miss) / total,
+            )
     return dict(
         metrics=values,
+        **(dict(local_lookups=lookup) if local_lookups else {}),
         l2_hit_fraction=hits / (hits + misses),
         replay_count_disagreement=abs(reads - hits - misses) / reads,
     )
@@ -78,6 +98,7 @@ def main(argv=None):
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
+    parser.add_argument("--local-lookups", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require fresh control counter output")
@@ -97,6 +118,7 @@ def main(argv=None):
         if grid
         else [dict(local_slots=128, programs=p) for p in (48, 96, 384)]
     )
+    metrics = METRICS + LOCAL_LOOKUP_METRICS if args.local_lookups else METRICS
     baseline = snapshot(0)
     graphics = (
         tuple(p["pid"] for p in baseline["graphics_processes"])
@@ -118,7 +140,7 @@ def main(argv=None):
             allowed_graphics=list(graphics),
             iterations=65536,
             workload="local",
-            metrics=list(METRICS),
+            metrics=list(metrics),
             baseline=baseline,
             binary_sha256=digests,
             binaries={s: str(p) for s, p in binary_map.items()},
@@ -148,7 +170,7 @@ def main(argv=None):
             "--launch-count",
             "1",
             "--metrics",
-            ",".join(METRICS),
+            ",".join(metrics),
             "--csv",
             "--log-file",
             str(counters),
@@ -195,7 +217,9 @@ def main(argv=None):
                 counter_only=grid,
             )
             result["counter_sha256"] = hashlib.sha256(counters.read_bytes()).hexdigest()
-            result["counters"] = parse_counters(counters.read_text())
+            result["counters"] = parse_counters(
+                counters.read_text(), local_lookups=args.local_lookups
+            )
             result["status"] = "complete"
         except Exception as error:
             result.update(status="failed", error=str(error))

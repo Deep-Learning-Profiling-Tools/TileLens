@@ -5,15 +5,62 @@ import csv
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
 
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 from triton_viz.tools.gpu_cupti_perturbation_audit import audit_log
 from triton_viz.tools.gpu_local_cache_counter_collect import (
     METRICS,
+    LOCAL_LOOKUP_METRICS,
     footprint_grid,
     parse_counters,
 )
+
+
+def footprint_only_error_bound(rows):
+    """Oracle in-sample bound for reads = source_loads * f(footprint).
+
+    This is not a fit candidate or CV result. For fixed observed labels, the
+    weighted median minimizes relative absolute error. Measurement/replay
+    uncertainty is not separated from mechanism differences by this bound.
+    """
+    groups = {}
+    for row in rows:
+        value = row["l2_reads_per_source_local_load"]
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("Require positive finite observed traffic ratios")
+        groups.setdefault(row["footprint_bytes"], []).append(value)
+    if not groups:
+        raise ValueError("Require nonempty controls")
+    results = []
+    for footprint, values in sorted(groups.items()):
+        threshold = sum(1 / value for value in values) / 2
+        weight = 0
+        for median in sorted(values):
+            weight += 1 / median
+            if weight >= threshold:
+                break
+        errors = [abs(median - value) / value for value in values]
+        results.append(
+            dict(
+                footprint_bytes=footprint,
+                count=len(values),
+                observed_ratios=values,
+                minimum_observed_mape_pct=100 * sum(errors) / len(errors),
+                minimum_observed_worst_relative_error_pct=100
+                * (max(values) - min(values))
+                / (max(values) + min(values)),
+            )
+        )
+    return dict(
+        groups=results,
+        minimum_observed_mape_pct=sum(
+            r["minimum_observed_mape_pct"] * r["count"] for r in results
+        )
+        / len(rows),
+        caveat="Oracle lower bound on these counters only, not CV or latency MAPE; replay uncertainty and mechanism differences remain confounded.",
+    )
 
 
 def audit_grid(root):
@@ -26,7 +73,8 @@ def audit_grid(root):
         or manifest.get("counter_only") is not True
         or manifest.get("iterations") != 65536
         or manifest.get("workload") != "local"
-        or manifest.get("metrics") != list(METRICS)
+        or manifest.get("metrics")
+        not in (list(METRICS), list(METRICS + LOCAL_LOOKUP_METRICS))
     ):
         raise ValueError("Require the complete declared control footprint grid")
     rows = []
@@ -59,7 +107,10 @@ def audit_grid(root):
             local_slots=s,
             counter_only=True,
         )
-        parsed = parse_counters(counters.decode())
+        parsed = parse_counters(
+            counters.decode(),
+            local_lookups=manifest["metrics"] == list(METRICS + LOCAL_LOOKUP_METRICS),
+        )
         if native != row["native_audit"] or parsed != row["counters"]:
             raise ValueError("Stored audit differs from raw evidence")
         lines = counters.decode().splitlines()
@@ -110,6 +161,11 @@ def audit_grid(root):
                 source_local_store_sectors=expected,
                 local_load_exact=metrics[METRICS[0]] == expected,
                 local_store_exact=metrics[METRICS[1]] == expected,
+                # These are traffic ratios, NOT measured local-load miss
+                # probabilities: L2 reads include other kernel traffic and
+                # metrics can be collected in separate replay passes.
+                l2_reads_per_source_local_load=metrics[METRICS[3]] / expected,
+                l2_reads_per_source_local_access=metrics[METRICS[3]] / (2 * expected),
                 **parsed,
             )
         )
@@ -118,6 +174,7 @@ def audit_grid(root):
         eligible_for_fit=False,
         count=len(rows),
         rows=rows,
+        footprint_only_error_bound=footprint_only_error_bound(rows),
         caveat="All controls retained. Counter diagnosis only; no latency CV or source spill-allocation validation.",
     )
 

@@ -7,6 +7,22 @@ from triton_viz.tools.gpu_local_cache_counter_collect import METRICS, parse_coun
 from triton_viz.tools.gpu_cupti_perturbation_collect import _owned_group_sample
 
 
+def test_local_load_and_store_lookups_are_separate_and_complete():
+    from triton_viz.tools.gpu_local_cache_counter_collect import LOCAL_LOOKUP_METRICS
+
+    raw = counters()
+    for name, value in zip(LOCAL_LOOKUP_METRICS, (100, 900, 990, 20)):
+        raw += f'"0","perturbation_body(float*)","{name}","sector","{value}"\n'
+    result = parse_counters(raw, local_lookups=True)
+    assert result["local_lookups"]["load"]["hit_fraction"] == 0.1
+    assert result["local_lookups"]["store"]["hit_fraction"] == pytest.approx(990 / 1010)
+    assert result["local_lookups"]["store"]["replay_count_disagreement"] == 0.01
+    with pytest.raises(ValueError):
+        parse_counters(raw)
+    with pytest.raises(ValueError):
+        parse_counters(counters(), local_lookups=True)
+
+
 def test_footprint_grid_separates_axes_without_dropping_cases():
     from triton_viz.tools.gpu_local_cache_counter_collect import footprint_grid
 
