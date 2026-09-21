@@ -11,7 +11,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("geometry", "structure", "pressure", "pressure_pipeline"),
+        choices=(
+            "geometry",
+            "structure",
+            "pressure",
+            "pressure_pipeline",
+            "resource_dot",
+        ),
         required=True,
     )
     parser.add_argument("--case-id", required=True)

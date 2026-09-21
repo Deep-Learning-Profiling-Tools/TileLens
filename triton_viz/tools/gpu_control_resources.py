@@ -49,6 +49,7 @@ def selected_controls(suite):
         "pressure_pipeline",
         "pressure_k_transfer",
         "resource_transfer",
+        "resource_dot",
         "composition_component",
     }:
         raise ValueError(
@@ -71,6 +72,7 @@ def main(argv=None):
             "pressure_pipeline",
             "pressure_k_transfer",
             "resource_transfer",
+            "resource_dot",
             "composition_component",
         ),
         required=True,

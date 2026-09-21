@@ -77,15 +77,20 @@ def parse(text):
 
 
 def audit(counter_root, resource_root, source_root=None, *, suite="pressure"):
-    if suite not in {"pressure", "pressure_pipeline"}:
+    if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
         raise ValueError("Require a declared pressure control suite")
     cases = selected_controls(suite)
     manifests = [
         json.loads((p / "manifest.json").read_text())
         for p in (counter_root, resource_root)
     ]
-    for manifest in manifests:
-        if manifest.get("role") != "control" or manifest.get("cases") != cases:
+    for index, manifest in enumerate(manifests):
+        expected = (
+            selected_controls("resource_transfer")
+            if index == 1 and suite == "resource_dot"
+            else cases
+        )
+        if manifest.get("role") != "control" or manifest.get("cases") != expected:
             raise ValueError("Require identical complete declared control manifests")
     if manifests[0].get("metrics") != list(METRICS) or not manifests[0].get(
         "hardware", {}
@@ -164,7 +169,9 @@ def audit(counter_root, resource_root, source_root=None, *, suite="pressure"):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--suite", choices=("pressure", "pressure_pipeline"), default="pressure"
+        "--suite",
+        choices=("pressure", "pressure_pipeline", "resource_dot"),
+        default="pressure",
     )
     parser.add_argument("--counter-root", type=Path, required=True)
     parser.add_argument("--resource-root", type=Path, required=True)

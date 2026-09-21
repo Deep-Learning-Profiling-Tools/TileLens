@@ -82,7 +82,7 @@ def reusable_controls(
 
 
 def commands(ncu, output, *, allow_idle_graphics=False, suite="pressure"):
-    if suite not in {"pressure", "pressure_pipeline"}:
+    if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
         raise ValueError("Require a declared pressure control suite")
     result = []
     for case in selected_controls(suite):
@@ -118,7 +118,9 @@ def commands(ncu, output, *, allow_idle_graphics=False, suite="pressure"):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--suite", choices=("pressure", "pressure_pipeline"), default="pressure"
+        "--suite",
+        choices=("pressure", "pressure_pipeline", "resource_dot"),
+        default="pressure",
     )
     parser.add_argument("--ncu", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

@@ -20,11 +20,22 @@ def load_cases(suite, role):
         "pressure_pipeline",
         "pressure_k_transfer",
         "resource_transfer",
+        "resource_dot",
         "composition_component",
     }:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "resource_dot":
+        if role == "holdout":
+            return []
+        # A separately declared counter phase covering EVERY pure-dot member
+        # of the existing transfer suite. No latency controls are removed.
+        return [
+            c
+            for c in load_cases("resource_transfer", "control")
+            if c["kind"] == "geometry_dot"
+        ]
     if suite == "pressure_k_transfer":
         if role == "holdout":
             return []
