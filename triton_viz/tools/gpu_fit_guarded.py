@@ -2,10 +2,56 @@
 
 import argparse
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 from triton_viz.tools.gpu_distribution_experiments import fit
+
+
+@contextmanager
+def audited_json_reads(allowed_paths, audit_output):
+    """Explicit-file JSON guard for multi-table control diagnostics.
+
+    Covers pathlib text/binary reads, not a process sandbox or arbitrary direct
+    OS access. Callers must declare control files and validate their roles;
+    directory-wide permission is deliberately not accepted.
+    """
+    audit_output = Path(audit_output)
+    if audit_output.exists():
+        raise ValueError("Require a fresh JSON read audit")
+    allowed = {Path(p).resolve() for p in allowed_paths}
+    if not allowed or any(p.suffix != ".json" for p in allowed):
+        raise ValueError("Declare explicit control JSON files")
+    original = Path.open
+    reads, blocked = [], []
+
+    def guarded(path, mode="r", *args, **kwargs):
+        if path.suffix == ".json" and ("r" in mode or "+" in mode):
+            resolved = path.resolve()
+            if resolved not in allowed:
+                blocked.append(str(resolved))
+                raise AssertionError(f"Fit attempted undeclared JSON read: {path}")
+            reads.append(str(resolved))
+        return original(path, mode, *args, **kwargs)
+
+    try:
+        with patch.object(Path, "open", guarded):
+            yield
+    finally:
+        audit_output.parent.mkdir(parents=True, exist_ok=True)
+        audit_output.write_text(
+            json.dumps(
+                dict(
+                    allowed_files=sorted(map(str, allowed)),
+                    reads=reads,
+                    blocked=blocked,
+                    boundary="Path.open JSON reads, including read_text/read_bytes; not an OS sandbox",
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
 
 
 def guarded_fit(root, output, *, wave_dot=False):
