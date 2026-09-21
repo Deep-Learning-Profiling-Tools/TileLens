@@ -23,6 +23,10 @@ def test_instruction_phase_has_typed_counters_not_profile_timing():
         ]
     )
     result = parse_issue(text)
+    composed = text.replace('"geometry_dot"', '"composed_dot"')
+    assert parse_issue(composed, kernel_name="composed_dot") == result
+    with pytest.raises(ValueError, match="Unexpected"):
+        parse_issue(composed)
     assert result[ISSUE_METRICS[0]] == 0
     assert result[ISSUE_METRICS[4]] == 10.5
     with pytest.raises(ValueError, match="Invalid"):
@@ -69,7 +73,13 @@ def test_zero_spill_controls_and_load_store_asymmetry_remain_explicit():
 
 
 @pytest.mark.parametrize(
-    "suite,count", [("pressure", 32), ("pressure_pipeline", 32), ("resource_dot", 96)]
+    "suite,count",
+    [
+        ("pressure", 32),
+        ("pressure_pipeline", 32),
+        ("resource_dot", 96),
+        ("resource_composition", 96),
+    ],
 )
 def test_cache_phase_preserves_full_suite_and_cold_replay(suite, count):
     result = commands("ncu", Path("output"), suite=suite, cache_lookups=True)
@@ -78,3 +88,31 @@ def test_cache_phase_preserves_full_suite_and_cold_replay(suite, count):
         assert command[command.index("--metrics") + 1] == ",".join(CACHE_METRICS)
         assert command[command.index("--cache-control") + 1] == "all"
         assert command[command.index("--clock-control") + 1] == "none"
+
+
+def test_composition_phase_preserves_all_declared_controls_and_kernel_identity():
+    from microbench.gpu.common.cases import load_cases
+    from triton_viz.tools.gpu_control_resources import selected_controls
+
+    cases = selected_controls("resource_composition")
+    assert cases == [
+        c
+        for c in load_cases("resource_transfer", "control")
+        if c["kind"] == "structure_composition"
+    ]
+    assert len(cases) == 96
+    assert load_cases("resource_composition", "holdout") == []
+    assert (
+        len(
+            commands(
+                "ncu", Path("output"), suite="resource_composition", issue_work=True
+            )
+        )
+        == 96
+    )
+    with pytest.raises(ValueError, match="requires"):
+        commands("ncu", Path("output"), suite="resource_composition")
+    text = csv([0] * 9).replace('"geometry_dot"', '"composed_dot"')
+    assert parse(text, kernel_name="composed_dot")["LDL"]["requests"] == 0
+    with pytest.raises(ValueError, match="Unexpected"):
+        parse(text)

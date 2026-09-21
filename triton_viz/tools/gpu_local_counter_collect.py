@@ -54,6 +54,9 @@ def reusable_controls(
     """Validate completed parent rows; preserve failed rows only in their parent."""
     if cache_lookups and issue_work:
         raise ValueError("Declare separate counter phases")
+    kernel_name = "composed_dot" if suite == "resource_composition" else "geometry_dot"
+    if suite == "resource_composition" and not (cache_lookups or issue_work):
+        raise ValueError("Composition requires cache or issue counter phase")
     if cache_lookups or issue_work:
         from triton_viz.tools.gpu_dot_cache_counter_audit import (
             parse as parse_cache,
@@ -61,9 +64,13 @@ def reusable_controls(
         )
 
         parse_counter = (
-            (lambda text: parse_issue(text, retain_invalid_stalls=True))
+            (
+                lambda text: parse_issue(
+                    text, retain_invalid_stalls=True, kernel_name=kernel_name
+                )
+            )
             if issue_work
-            else parse_cache
+            else lambda text: parse_cache(text, kernel_name=kernel_name)
         )
     else:
         from triton_viz.tools.gpu_local_counter_audit import parse as parse_counter
@@ -168,8 +175,15 @@ def commands(
 ):
     if cache_lookups and issue_work:
         raise ValueError("Declare separate counter phases")
-    if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
+    if suite not in {
+        "pressure",
+        "pressure_pipeline",
+        "resource_dot",
+        "resource_composition",
+    }:
         raise ValueError("Require a declared pressure control suite")
+    if suite == "resource_composition" and not (cache_lookups or issue_work):
+        raise ValueError("Composition requires cache or issue counter phase")
     result = []
     for case in selected_controls(suite):
         command = [
@@ -211,7 +225,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("pressure", "pressure_pipeline", "resource_dot"),
+        choices=(
+            "pressure",
+            "pressure_pipeline",
+            "resource_dot",
+            "resource_composition",
+        ),
         default="pressure",
     )
     parser.add_argument("--ncu", type=Path, required=True)

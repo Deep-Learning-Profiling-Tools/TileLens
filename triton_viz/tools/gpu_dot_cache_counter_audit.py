@@ -19,7 +19,7 @@ from triton_viz.tools.gpu_local_counter_audit import validate_monitor
 from triton_viz.tools.gpu_local_counter_collect import CACHE_METRICS, ISSUE_METRICS
 
 
-def parse_issue(text, *, retain_invalid_stalls=False):
+def parse_issue(text, *, retain_invalid_stalls=False, kernel_name="geometry_dot"):
     lines = text.splitlines()
     header = next((i for i, line in enumerate(lines) if line.startswith('"ID",')), None)
     if header is None:
@@ -30,7 +30,7 @@ def parse_issue(text, *, retain_invalid_stalls=False):
         percent = name.endswith(".pct")
         if (
             row["ID"] != "0"
-            or row["Kernel Name"] != "geometry_dot"
+            or row["Kernel Name"] != kernel_name
             or name not in ISSUE_METRICS
             or name in values
             or row["Metric Unit"] != ("%" if percent else "inst")
@@ -50,7 +50,7 @@ def parse_issue(text, *, retain_invalid_stalls=False):
     return values
 
 
-def parse(text):
+def parse(text, *, kernel_name="geometry_dot"):
     lines = text.splitlines()
     header = next((i for i, line in enumerate(lines) if line.startswith('"ID",')), None)
     if header is None:
@@ -60,7 +60,7 @@ def parse(text):
         name = row["Metric Name"]
         if (
             row["ID"] != "0"
-            or row["Kernel Name"] != "geometry_dot"
+            or row["Kernel Name"] != kernel_name
             or name not in CACHE_METRICS
             or name in values
             or row["Metric Unit"] != "sector"
@@ -91,8 +91,14 @@ def audit(root, *, issue_work=False, retain_invalid_stalls=False):
         raise ValueError("Invalid-stall retention only applies to issue diagnostics")
     manifest = json.loads((root / "manifest.json").read_text())
     suite = manifest.get("suite")
-    if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
+    if suite not in {
+        "pressure",
+        "pressure_pipeline",
+        "resource_dot",
+        "resource_composition",
+    }:
         raise ValueError("Require declared dot controls")
+    kernel_name = "composed_dot" if suite == "resource_composition" else "geometry_dot"
     cases = selected_controls(suite)
     if (
         manifest.get("role") != "control"
@@ -114,9 +120,13 @@ def audit(root, *, issue_work=False, retain_invalid_stalls=False):
         ):
             raise ValueError("Missing numerical validation")
         counters = (
-            parse_issue(path.read_text(), retain_invalid_stalls=retain_invalid_stalls)
+            parse_issue(
+                path.read_text(),
+                retain_invalid_stalls=retain_invalid_stalls,
+                kernel_name=kernel_name,
+            )
             if issue_work
-            else parse(path.read_text())
+            else parse(path.read_text(), kernel_name=kernel_name)
         )
         errors = (
             {k: v for k, v in counters.items() if k.endswith(".pct") and v > 100}

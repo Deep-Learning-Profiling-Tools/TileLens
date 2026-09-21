@@ -17,6 +17,7 @@ def main(argv=None):
             "pressure",
             "pressure_pipeline",
             "resource_dot",
+            "resource_composition",
         ),
         required=True,
     )
