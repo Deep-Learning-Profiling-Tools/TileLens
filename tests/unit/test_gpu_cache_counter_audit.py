@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 
 import pytest
 
@@ -10,6 +11,7 @@ from triton_viz.tools.gpu_cache_counter_audit import (
     parse_counters,
 )
 from triton_viz.tools.gpu_control_resources import selected_controls
+from microbench.gpu.common.cache_controls import cache_declaration
 
 
 def table(hits=(1, 99, 1)):
@@ -99,3 +101,32 @@ def test_range_parser_does_not_treat_aggregate_as_three_kernels(tmp_path):
     assert report["zero_sweep_added_miss_footprints"] == 0
     assert not report["eligible_for_latency_fit"]
     assert len(report["rows"]) == 9
+
+
+def test_capacity_audit_binds_hardware_and_exact_probe_geometry(tmp_path):
+    declaration = cache_declaration("capacity")
+    manifest = dict(
+        role="control",
+        matrix="capacity",
+        declaration=declaration,
+        hardware=dict(uuid="control-gpu", driver="test-driver", index=0),
+    )
+    text = "\n".join(table().replace("cache_read_control", "range").splitlines()[:4])
+    for mib in declaration["working_set_mib"]:
+        for eviction in declaration["evictions"]:
+            path = tmp_path / f"{mib}_{eviction}.csv"
+            path.write_text(text)
+            path.with_suffix(".log").write_text(
+                f"control cache_read: {mib} MiB, eviction={eviction}, "
+                f"block={declaration['block_elements']}, "
+                f"L2={declaration['l2_bytes']}, numerical=passed"
+            )
+    assert not audit_ranges(tmp_path, "capacity")["complete"]
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    result = audit_ranges(tmp_path, "capacity")
+    assert result["complete"] and len(result["rows"]) == 27
+    assert result["hardware"] == manifest["hardware"]
+    (tmp_path / "3_zero.log").write_text("numerical=passed")
+    result = audit_ranges(tmp_path, "capacity")
+    assert not result["complete"] and len(result["rows"]) == 27
+    assert not result["replay_counts_consistent"]
