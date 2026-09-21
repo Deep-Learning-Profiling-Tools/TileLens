@@ -81,8 +81,8 @@ def main(argv=None):
     sweep_out = torch.empty_like(sweep) if args.eviction == "read" else None
     # Compile all control launches before constructing the measured cache state.
     cache_read_control[(triton.cdiv(n, block),)](x, y, n, block)
+    sweep.zero_()  # Warm the native sweep path before range capture as well.
     if sweep_out is not None:
-        sweep.zero_()
         cache_eviction_read[(triton.cdiv(sweep.numel(), 1024),)](
             sweep, sweep_out, sweep.numel(), 1024
         )
