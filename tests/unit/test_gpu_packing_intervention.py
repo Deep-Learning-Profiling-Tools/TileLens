@@ -10,7 +10,31 @@ from triton_viz.tools.gpu_packing_intervention import (
     scalarize_values,
     variants,
     unroll_control_loop,
+    disable_backend_unroll,
 )
+
+
+def test_nounroll_is_module_scoped_and_changes_only_the_directive():
+    ptx = ".version 9.1\n.target sm_121a\n.address_size 64\n.visible .entry kernel() { ret; }\n"
+    changed = disable_backend_unroll(ptx)
+    assert changed.replace('\n.pragma "nounroll";\n', "") == ptx
+    assert changed.index('.pragma "nounroll"') < changed.index(".visible .entry")
+    row = dict(
+        role="control",
+        artifacts=dict(ptx=ptx),
+        artifact_sha256=dict(ptx=hashlib.sha256(ptx.encode()).hexdigest()),
+    )
+    values, count = variants(row, "nounroll")
+    assert values == dict(original=ptx, nounroll=changed) and count == 1
+    with pytest.raises(ValueError):
+        disable_backend_unroll(changed)
+    with pytest.raises(ValueError):
+        disable_backend_unroll(ptx.replace(".address_size 64", ".address_size 32"))
+    with pytest.raises(ValueError):
+        disable_backend_unroll(ptx + "\n.address_size 64\n")
+    row["role"] = "holdout"
+    with pytest.raises(ValueError):
+        variants(row, "nounroll")
 
 
 def loop_ptx():
@@ -126,8 +150,9 @@ def test_target_and_modified_artifacts_rejected():
         variants(row)
 
 
+@pytest.mark.parametrize("mode", ["fma", "nounroll"])
 def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, mode
 ):
     from triton_viz.tools import gpu_packing_intervention as tool
 
@@ -137,8 +162,18 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
         dict(id=f"resource_dot_float32_ieee_128x256x32_w{w}_s{s}_{r}")
         for w, s, r in ((4, 1, 1), (4, 1, 5), (4, 2, 5), (8, 1, 5))
     ]
+    if mode == "nounroll":
+        cases = [
+            dict(id=f"pressure_p48_{dtype}_{precision}_{m}x128x32_w{warps}_s2")
+            for dtype, precision, m, warps in (
+                ("bfloat16", "ieee", 256, 4),
+                ("float32", "tf32", 128, 4),
+                ("float32", "tf32", 128, 8),
+                ("float32", "ieee", 256, 4),
+            )
+        ]
     (root / "manifest.json").write_text(json.dumps(dict(role="control", cases=cases)))
-    ptx = ".target sm_121a\nfma.rn.f32x2 %rd0, %rd1, %rd2, %rd0;\n"
+    ptx = ".target sm_121a\n.address_size 64\nfma.rn.f32x2 %rd0, %rd1, %rd2, %rd0;\n"
     for case in cases:
         row = dict(
             role="control",
@@ -172,6 +207,8 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
             "cuobjdump",
             "--regalloc-opt-level",
             "2",
+            "--mode",
+            mode,
         ]
     )
     assert sum("-o" in c for c in invocations) == 8
@@ -181,6 +218,13 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["regalloc_opt_level"] == 2 and not manifest["gpu_execution"]
     assert not manifest["eligible_for_fit"]
+    assert manifest["intervention"] == mode
+    variant = "nounroll" if mode == "nounroll" else "scalar_fma"
+    changed_report = json.loads(
+        (output / cases[0]["id"] / (variant + ".json")).read_text()
+    )
+    assert changed_report["nounroll_directives"] == int(mode == "nounroll")
+    assert changed_report["rewritten_fmas"] == int(mode == "fma")
     original_path = root / "controls" / (cases[0]["id"] + ".json")
     changed = json.loads(original_path.read_text())
     changed["cubin_sha256"] = "different baseline"
@@ -199,7 +243,9 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
                 "cuobjdump",
                 "--regalloc-opt-level",
                 "2",
+                "--mode",
+                mode,
             ]
         )
     assert (failed / cases[0]["id"] / "original.json").exists()
-    assert not (failed / cases[0]["id"] / "scalar_fma.ptx").exists()
+    assert not (failed / cases[0]["id"] / (variant + ".ptx")).exists()

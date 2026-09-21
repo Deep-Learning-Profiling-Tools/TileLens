@@ -196,14 +196,25 @@ def unroll_control_loop(ptx, trips):
     return ptx[: header.end()] + body * trips + ptx[branch.end() :], trips
 
 
+def disable_backend_unroll(ptx):
+    """Add the documented module-scope nounroll directive, no GPU execution."""
+    headers = list(re.finditer(r"^\.address_size\s+64\s*$", ptx, re.M))
+    if len(headers) != 1 or '"nounroll"' in ptx:
+        raise ValueError("Require one address-size header and no existing nounroll")
+    offset = headers[0].end()
+    return ptx[:offset] + '\n.pragma "nounroll";\n' + ptx[offset:]
+
+
 def variants(row, mode="fma"):
     if row.get("role") != "control":
         raise ValueError("Only declared control artifacts may be transformed")
     ptx = row["artifacts"]["ptx"]
     if hashlib.sha256(ptx.encode()).hexdigest() != row["artifact_sha256"]["ptx"]:
         raise ValueError("Control PTX digest mismatch")
-    if mode not in {"fma", "value_pairs", "unroll"}:
+    if mode not in {"fma", "value_pairs", "unroll", "nounroll"}:
         raise ValueError("Unknown intervention")
+    if mode == "nounroll":
+        return {"original": ptx, "nounroll": disable_backend_unroll(ptx)}, 1
     if mode == "unroll":
         rewritten, count = unroll_control_loop(ptx, row["case"]["repeat"])
         return {"original": ptx, "unrolled": rewritten}, count
@@ -219,7 +230,7 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--regalloc-opt-level", type=int, choices=(0, 1, 2))
     parser.add_argument(
-        "--mode", choices=("fma", "value_pairs", "unroll"), default="fma"
+        "--mode", choices=("fma", "value_pairs", "unroll", "nounroll"), default="fma"
     )
     args = parser.parse_args(argv)
     if args.output.exists():
@@ -231,6 +242,16 @@ def main(argv=None):
         f"resource_dot_float32_ieee_128x256x32_w{w}_s{s}_{r}"
         for w, s, r in ((4, 1, 1), (4, 1, 5), (4, 2, 5), (8, 1, 5))
     ]
+    if args.mode == "nounroll":
+        ids = [
+            f"pressure_p48_{dtype}_{precision}_{m}x{n}x32_w{w}_s2"
+            for dtype, precision, m, n, w in (
+                ("bfloat16", "ieee", 256, 128, 4),
+                ("float32", "tf32", 128, 128, 4),
+                ("float32", "tf32", 128, 128, 8),
+                ("float32", "ieee", 256, 128, 4),
+            )
+        ]
     cases = {c["id"]: c for c in manifest["cases"]}
     if not set(ids) <= set(cases):
         raise ValueError("Missing declared matched controls")
@@ -310,9 +331,10 @@ def main(argv=None):
                     case=row["case"],
                     variant=name,
                     rewritten_fmas=count
-                    if name != "original" and args.mode != "unroll"
+                    if name != "original" and args.mode in {"fma", "value_pairs"}
                     else 0,
                     unrolled_trips=count if name == "unrolled" else 0,
+                    nounroll_directives=count if name == "nounroll" else 0,
                     command=command,
                     ptx_sha256=hashlib.sha256(ptx.encode()).hexdigest(),
                     cubin_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
