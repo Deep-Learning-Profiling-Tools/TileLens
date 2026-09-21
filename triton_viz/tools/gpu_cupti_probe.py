@@ -1,4 +1,4 @@
-"""Control-only HES/eviction smoke test, never a calibration dataset.
+"""Control-only CUPTI/eviction smoke test, never a calibration dataset.
 
 The eviction sweep must still be checked with separate control-only cache
 counters. A successful probe does not certify cold-cache measurements.
@@ -34,6 +34,7 @@ def main(argv=None):
             "coverage",
             "pressure",
             "resource_transfer",
+            "composition_component",
             "geometry",
             "structure",
             "stability",
@@ -53,6 +54,12 @@ def main(argv=None):
         help="Bound graph size and drain every replay; separate diagnostic protocol",
     )
     parser.add_argument("--delivery-timeout-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--timestamp-method", choices=("hes", "software_serial"), default="hes"
+    )
+    parser.add_argument(
+        "--eviction-mode", choices=("torch_zero", "persistent_sm"), default="torch_zero"
+    )
     parser.add_argument(
         "--capture-cache",
         action="store_true",
@@ -76,12 +83,8 @@ def main(argv=None):
         raise ValueError("Warmup duration must be finite and nonnegative")
     if args.output.exists():
         raise ValueError("Use a fresh probe output; do not overwrite attempts")
-    if args.monitored and not args.graph_samples:
-        raise ValueError("Monitored collection requires graph eviction/control pairs")
-    if args.kernels_per_sample < 1 or (
-        args.kernels_per_sample != 1 and not args.graph_samples
-    ):
-        raise ValueError("Replicated samples require a graph and a positive count")
+    if args.kernels_per_sample < 1:
+        raise ValueError("Replicated samples require a positive count")
     if args.graph_pairs_per_replay is not None and (
         not args.graph_samples
         or args.graph_pairs_per_replay < 1
@@ -96,7 +99,9 @@ def main(argv=None):
     )
     assert_available(baseline, allowed_graphics=graphics)
     collector = CuptiTimestamps(
-        args.library, delivery_timeout_seconds=args.delivery_timeout_seconds
+        args.library,
+        delivery_timeout_seconds=args.delivery_timeout_seconds,
+        timestamp_method=args.timestamp_method,
     )  # Before any CUDA context.
     try:
         return _run_probe(args, baseline, graphics, collector)
@@ -162,6 +167,17 @@ def _run_probe(args, baseline, graphics, collector):
         raise RuntimeError("Cannot query L2 capacity")
     sweep_bytes = 2 * l2_bytes.value
     sweep = torch.empty(sweep_bytes, dtype=torch.uint8, device="cuda:0")
+    if args.eviction_mode == "persistent_sm":
+        from microbench.gpu.harness.eviction import persistent_eviction
+
+        sm_count = torch.cuda.get_device_properties(0).multi_processor_count
+
+        def evict():
+            persistent_eviction[(sm_count,)](
+                sweep, sweep_bytes, BLOCK=4096, PROGRAMS=sm_count, num_warps=4
+            )
+    else:
+        evict = sweep.zero_
     kernel, grid, inputs, out = prepare(case, "cuda:0")
 
     def launch():
@@ -169,13 +185,13 @@ def _run_probe(args, baseline, graphics, collector):
 
     # Compile and warm up outside measured samples; infer names only from this
     # declared control, not from a target compiler cache.
-    sweep.zero_()
+    evict()
     launch()
     torch.cuda.synchronize()
     collector.read(expected_count=2)
     check_output(case, out)
     collector.clear()
-    sweep.zero_()
+    evict()
     launch()
     torch.cuda.synchronize()
     warm_records = sorted(collector.read(expected_count=2), key=lambda r: r["start_ns"])
@@ -200,7 +216,7 @@ def _run_probe(args, baseline, graphics, collector):
     warmup_launches = 0
     collector.clear()
     while time.monotonic() < deadline:
-        sweep.zero_()
+        evict()
         launch()
         torch.cuda.synchronize()
         collector.read(expected_count=2)
@@ -216,7 +232,7 @@ def _run_probe(args, baseline, graphics, collector):
         graph = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(graph):
             for _ in range(pairs_per_replay):
-                sweep.zero_()
+                evict()
                 launch()
         handle = ctypes.c_void_p(graph.raw_cuda_graph())
         node_count = ctypes.c_size_t()
@@ -300,22 +316,31 @@ def _run_probe(args, baseline, graphics, collector):
         samples = group_kernel_intervals(
             records, kernels_per_sample=args.kernels_per_sample
         )
-    for _ in range(0 if args.graph_samples else 11):
-        sample = snapshot(0)
-        assert_available(sample, own_pid=os.getpid(), allowed_graphics=graphics)
-        telemetry.append(sample)
-        collector.clear()
-        sweep.zero_()  # Same stream; not part of the control's timestamp interval.
-        launch()
-        torch.cuda.synchronize()
+    if not args.graph_samples:
+
+        def measured_direct():
+            raw = []
+            for _ in range(11 * args.kernels_per_sample):
+                collector.clear()
+                evict()  # Outside the control's timestamp interval.
+                launch()
+                torch.cuda.synchronize()
+                raw.extend(
+                    validate_timestamps(
+                        collector.read(expected_count=2), expected_names=names, device=0
+                    )
+                )
+            return raw
+
+        if args.monitored:
+            raw, monitoring = monitor_call(measured_direct, allowed_graphics=graphics)
+        else:
+            raw = measured_direct()
         records = validate_timestamps(
-            collector.read(expected_count=2), expected_names=names, device=0
+            raw, expected_names=names * 11 * args.kernels_per_sample, device=0
         )
-        samples.append(
-            dict(
-                records=records,
-                latency_us=(records[1]["end_ns"] - records[1]["start_ns"]) / 1000,
-            )
+        samples = group_kernel_intervals(
+            records, kernels_per_sample=args.kernels_per_sample
         )
     check_output(case, out)
     telemetry.append(snapshot(0))
@@ -333,6 +358,7 @@ def _run_probe(args, baseline, graphics, collector):
             samples=samples,
             kernels_per_sample=args.kernels_per_sample,
             delivery_timeout_seconds=args.delivery_timeout_seconds,
+            timestamp_method=args.timestamp_method,
             telemetry=telemetry,
             monitoring=monitoring,
             contaminated=monitoring["contaminated"] if monitoring else None,
@@ -349,11 +375,14 @@ def _run_probe(args, baseline, graphics, collector):
             graph_warmup_replays=graph_warmup_replays if args.graph_samples else 0,
             graph_kernel_nodes=graph_kernel_nodes if args.graph_samples else None,
             graph_pairs_per_replay=args.graph_pairs_per_replay,
-            metric="cupti_hes_kernel_us_eviction_unvalidated"
+            metric="cupti_software_serial_group_mean_kernel_us_eviction_unvalidated"
+            if args.timestamp_method == "software_serial"
+            else "cupti_hes_kernel_us_eviction_unvalidated"
             if args.kernels_per_sample == 1
             else "cupti_hes_group_mean_kernel_us_eviction_unvalidated",
             l2_capacity_bytes=l2_bytes.value,
             eviction_bytes=sweep_bytes,
+            eviction_mode=args.eviction_mode,
             cache_counter_validation="pending",
             eligible_for_fit=False,
             library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
@@ -361,7 +390,9 @@ def _run_probe(args, baseline, graphics, collector):
             dropped_records=0,
         ),
     )
-    print(f"Saved {len(samples)} HES samples; eviction validation remains pending")
+    print(
+        f"Saved {len(samples)} {args.timestamp_method} samples; eviction validation remains pending"
+    )
     return 0
 
 

@@ -43,6 +43,8 @@ int main(int argc, char **argv) {
       (iterations != 16 && iterations != 65536)) return 2;
   void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
   if (!library) { std::fprintf(stderr, "%s\n", dlerror()); return 3; }
+  auto method = reinterpret_cast<int (*)()>(dlsym(library, "tv_cupti_hardware_trace"));
+  std::printf("hardware_trace=%d,diagnostic_only=true\n", method ? method() : -1);
   auto init = reinterpret_cast<int (*)()>(dlsym(library, "tv_cupti_init"));
   auto flush = reinterpret_cast<int (*)()>(dlsym(library, "tv_cupti_flush"));
   auto count = reinterpret_cast<size_t (*)()>(dlsym(library, "tv_cupti_count"));
@@ -73,7 +75,13 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (std::chrono::steady_clock::now() < deadline);
     dump(phase);
-    return count() == expected && dropped() == 0;
+    bool timestamps_valid = true;
+    for (size_t i = 0; i < count(); ++i) {
+      Timestamp r{};
+      if (get(i, &r) || !r.start_ns || r.end_ns <= r.start_ns) timestamps_valid = false;
+    }
+    std::printf("phase=%s,timestamps_valid=%d\n", phase, timestamps_valid);
+    return count() == expected && dropped() == 0 && timestamps_valid;
   };
   int l2 = 0;
   check(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, 0));

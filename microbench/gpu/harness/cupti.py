@@ -1,9 +1,11 @@
-"""Explicit control-only HES timestamp collection; no CUDA-event fallback.
+"""Explicit control-only CUPTI timestamp collection; no CUDA-event fallback.
 
 Load the separately built CUPTI 13.1 bridge before CUDA context creation.
 Hardware timestamps exclude flush kernels and host launch gaps by construction.
 An eviction sweep is not proof of cold L2: validate it with control-only counters
 before admitting any timings to a cold-cache calibration dataset.
+Software-serial diagnostics require explicit selection and a matching bridge;
+their perturbation must be measured separately, never relabelled as HES.
 """
 
 from __future__ import annotations
@@ -68,12 +70,28 @@ def group_kernel_intervals(records, *, kernels_per_sample, sample_count=11):
 
 
 class CuptiTimestamps:
-    def __init__(self, library, *, delivery_timeout_seconds=1.0):
+    def __init__(
+        self, library, *, delivery_timeout_seconds=1.0, timestamp_method="hes"
+    ):
+        if timestamp_method not in {"hes", "software_serial"}:
+            raise ValueError("Unknown explicit CUPTI timestamp method")
         if not math.isfinite(delivery_timeout_seconds) or delivery_timeout_seconds < 0:
             raise ValueError("HES delivery timeout must be finite and nonnegative")
         self._delivery_timeout_seconds = delivery_timeout_seconds
         self.library = str(Path(library).resolve(strict=True))
         self._lib = ctypes.CDLL(self.library)
+        mode = getattr(self._lib, "tv_cupti_hardware_trace", None)
+        kind = getattr(self._lib, "tv_cupti_activity_kind", None)
+        if timestamp_method == "hes":
+            if mode is not None and mode() != 1:
+                raise ValueError("This HES probe rejects non-HES diagnostic bridges")
+        elif mode is None or mode() != 0 or kind is None or kind() != 3:
+            # CUPTI_ACTIVITY_KIND_KERNEL = 3. Explicit native software-serial
+            # diagnostics must never masquerade as HES or use silent fallback.
+            raise ValueError(
+                "Software-serial diagnostics require a matching labelled bridge"
+            )
+        self.timestamp_method = timestamp_method
         self._lib.tv_cupti_init.restype = ctypes.c_int
         self._lib.tv_cupti_flush.restype = ctypes.c_int
         self._lib.tv_cupti_count.restype = ctypes.c_size_t
@@ -89,7 +107,7 @@ class CuptiTimestamps:
     def _check(status):
         if status:
             raise RuntimeError(
-                f"CUPTI HES bridge failed (status {status}); no fallback"
+                f"CUPTI timestamp bridge failed (status {status}); no fallback"
             )
 
     def read(self, *, expected_count=None, timeout_seconds=None):
@@ -112,7 +130,7 @@ class CuptiTimestamps:
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"Timed out waiting for {expected_count} HES records; received {self._lib.tv_cupti_count()}"
+                    f"Timed out waiting for {expected_count} CUPTI records; received {self._lib.tv_cupti_count()}"
                 )
             time.sleep(0.001)
         if self._lib.tv_cupti_dropped():

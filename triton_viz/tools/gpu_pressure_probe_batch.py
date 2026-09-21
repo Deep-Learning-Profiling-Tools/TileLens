@@ -27,6 +27,7 @@ def main(argv=None):
         choices=(
             "pressure",
             "resource_transfer",
+            "composition_component",
             "geometry",
             "structure",
             "stability",
@@ -37,6 +38,12 @@ def main(argv=None):
     parser.add_argument("--monitored", action="store_true")
     parser.add_argument("--capture-cache", action="store_true")
     parser.add_argument("--kernels-per-sample", type=int, default=1)
+    parser.add_argument(
+        "--timestamp-method", choices=("hes", "software_serial"), default="hes"
+    )
+    parser.add_argument(
+        "--launch-mode", choices=("graph", "individual"), default="graph"
+    )
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh diagnostic root")
@@ -51,6 +58,8 @@ def main(argv=None):
             monitored=args.monitored,
             capture_cache=args.capture_cache,
             kernels_per_sample=args.kernels_per_sample,
+            timestamp_method=args.timestamp_method,
+            launch_mode=args.launch_mode,
             packages={
                 name: importlib.metadata.version(name) for name in ("torch", "triton")
             },
@@ -64,7 +73,9 @@ def main(argv=None):
             cases=cases,
             eligible_for_fit=False,
             attempt_policy="first complete stable batch, maximum 3; retain every attempt",
-            metric="cupti_hes_kernel_us_eviction_unvalidated"
+            metric="cupti_software_serial_group_mean_kernel_us_eviction_unvalidated"
+            if args.timestamp_method == "software_serial"
+            else "cupti_hes_kernel_us_eviction_unvalidated"
             if args.kernels_per_sample == 1
             else "cupti_hes_group_mean_kernel_us_eviction_unvalidated",
         ),
@@ -83,10 +94,13 @@ def main(argv=None):
             args.suite,
             "--case-id",
             case["id"],
-            "--graph-samples",
+            "--timestamp-method",
+            args.timestamp_method,
             "--kernels-per-sample",
             str(args.kernels_per_sample),
         ]
+        if args.launch_mode == "graph":
+            command.append("--graph-samples")
         if args.allow_idle_graphics:
             command.append("--allow-idle-graphics")
         if args.monitored:

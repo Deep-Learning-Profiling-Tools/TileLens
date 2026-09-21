@@ -1,9 +1,32 @@
 import copy
+from unittest.mock import Mock
 
 import pytest
 
 from microbench.gpu.harness.cupti import validate_timestamps
 from microbench.gpu.harness.cupti import CuptiTimestamps, group_kernel_intervals
+
+
+def test_software_diagnostics_require_explicit_selection_and_matching_kind(
+    tmp_path, monkeypatch
+):
+    library = Mock()
+    library.tv_cupti_hardware_trace.return_value = 0
+    library.tv_cupti_activity_kind.return_value = 3
+    library.tv_cupti_init.return_value = 0
+    library.tv_cupti_close.return_value = 0
+    path = tmp_path / "bridge.so"
+    path.write_bytes(b"fake diagnostic bridge")
+    monkeypatch.setattr("microbench.gpu.harness.cupti.ctypes.CDLL", lambda _: library)
+    with pytest.raises(ValueError, match="non-HES"):
+        CuptiTimestamps(path)
+    library.tv_cupti_init.assert_not_called()
+    probe = CuptiTimestamps(path, timestamp_method="software_serial")
+    assert probe.timestamp_method == "software_serial"
+    probe.close()
+    library.tv_cupti_activity_kind.return_value = 10
+    with pytest.raises(ValueError, match="labelled bridge"):
+        CuptiTimestamps(path, timestamp_method="software_serial")
 
 
 def rows():

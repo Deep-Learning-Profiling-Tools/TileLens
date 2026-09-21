@@ -65,6 +65,7 @@ def test_recompute_every_kernel_only_interval():
         ("library_sha256", "changed"),
         ("eviction_bytes", 24),
         ("dropped_records", 1),
+        ("eviction_mode", "persistent_sm"),
         ("eligible_for_fit", True),
     ],
 )
@@ -79,4 +80,23 @@ def test_chunked_protocol_cannot_be_silently_mixed():
     record = row()
     record["launch_mode"] = "chunked_graph_eviction_control_pairs"
     with pytest.raises(ValueError, match="provenance"):
+        validate_batch(record, record["case"], library_sha256="declared-digest")
+
+
+def test_explicit_software_direct_protocol_is_not_relabelled_hes():
+    record = row()
+    record.update(
+        timestamp_method="software_serial",
+        launch_mode="individual_launches",
+        graph_kernel_nodes=None,
+        metric="cupti_software_serial_group_mean_kernel_us_eviction_unvalidated",
+    )
+    assert (
+        validate_batch(record, record["case"], library_sha256="declared-digest")[
+            "sample_count"
+        ]
+        == 11
+    )
+    record["timestamp_method"] = "hes"
+    with pytest.raises(ValueError, match="protocol"):
         validate_batch(record, record["case"], library_sha256="declared-digest")

@@ -115,3 +115,35 @@ def test_monitored_batch_rejects_missing_monitoring(tmp_path, monkeypatch):
                 "--capture-cache",
             ]
         )
+
+
+def test_explicit_direct_method_is_declared_before_collection(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "load_cases", lambda *_: [{"id": "declared"}])
+
+    def run(command, **kwargs):
+        assert "--graph-samples" not in command
+        assert command[command.index("--timestamp-method") + 1] == "software_serial"
+        assert command[command.index("--kernels-per-sample") + 1] == "32"
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(batch.subprocess, "run", run)
+    root = tmp_path / "batch"
+    with pytest.raises(RuntimeError, match="after 3"):
+        batch.main(
+            [
+                "--library",
+                "unused",
+                "--output",
+                str(root),
+                "--timestamp-method",
+                "software_serial",
+                "--launch-mode",
+                "individual",
+                "--kernels-per-sample",
+                "32",
+            ]
+        )
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["timestamp_method"] == "software_serial"
+    assert manifest["launch_mode"] == "individual"
+    assert "software_serial" in manifest["metric"]

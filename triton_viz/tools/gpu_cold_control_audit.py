@@ -20,6 +20,13 @@ def validate_batch(row, case, *, library_sha256):
     ):
         raise ValueError("Invalid replication count")
     monitor = row.get("monitoring")
+    method = row.get("timestamp_method", "hes")
+    launch = row.get("launch_mode")
+    if method not in {"hes", "software_serial"} or launch not in {
+        "graph_eviction_control_pairs",
+        "individual_launches",
+    }:
+        raise ValueError("Unverified HES provenance or unknown CUPTI protocol")
     if (
         row.get("contaminated") is not False
         or not monitor
@@ -30,16 +37,19 @@ def validate_batch(row, case, *, library_sha256):
         raise ValueError("Missing or rejected process monitoring")
     if (
         row.get("dropped_records") != 0
+        or row.get("eviction_mode", "torch_zero") != "torch_zero"
         or row.get("numerical_validation") != "passed"
-        or row.get("graph_kernel_nodes") != 22 * repetitions
-        or row.get("launch_mode") != "graph_eviction_control_pairs"
+        or row.get("graph_kernel_nodes")
+        != (22 * repetitions if launch == "graph_eviction_control_pairs" else None)
         or row.get("library_sha256") != library_sha256
     ):
         raise ValueError("Unverified HES provenance")
     if (
         row.get("metric")
         != (
-            "cupti_hes_kernel_us_eviction_unvalidated"
+            "cupti_software_serial_group_mean_kernel_us_eviction_unvalidated"
+            if method == "software_serial"
+            else "cupti_hes_kernel_us_eviction_unvalidated"
             if repetitions == 1
             else "cupti_hes_group_mean_kernel_us_eviction_unvalidated"
         )
@@ -104,6 +114,13 @@ def audit(root):
         row = json.loads(path.read_text())
         if row.get("kernels_per_sample", 1) != manifest.get("kernels_per_sample", 1):
             raise ValueError("Mixed sample replication protocols")
+        if row.get("timestamp_method", "hes") != manifest.get(
+            "timestamp_method", "hes"
+        ) or row.get("launch_mode") != {
+            "graph": "graph_eviction_control_pairs",
+            "individual": "individual_launches",
+        }.get(manifest.get("launch_mode", "graph")):
+            raise ValueError("Mixed CUPTI timestamp or launch protocols")
         summary = validate_batch(row, case, library_sha256=manifest["library_sha256"])
         attempt = row["accepted_attempt"]
         if (

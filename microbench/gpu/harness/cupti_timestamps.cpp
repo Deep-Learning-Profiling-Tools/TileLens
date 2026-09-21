@@ -10,6 +10,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <cstdio>
 
 #ifndef TV_CUPTI_API_VERSION
 #define TV_CUPTI_API_VERSION 130100
@@ -26,6 +27,12 @@
 #ifndef TV_CUPTI_POLL_MS
 #define TV_CUPTI_POLL_MS 0
 #endif
+#ifndef TV_CUPTI_HARDWARE_TRACE
+#define TV_CUPTI_HARDWARE_TRACE 1
+#endif
+#ifndef TV_CUPTI_ACTIVITY_KIND
+#define TV_CUPTI_ACTIVITY_KIND CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL
+#endif
 
 struct KernelTimestamp {
   uint64_t start_ns, end_ns;
@@ -40,6 +47,20 @@ static std::atomic<size_t> dropped{0};
 static bool initialized = false;
 static std::atomic<bool> stop_polling{false};
 static std::thread polling_thread;
+static CUpti_SubscriberHandle state_subscriber;
+
+static void CUPTIAPI state_callback(void *, CUpti_CallbackDomain domain,
+                                    CUpti_CallbackId id, const void *data) {
+  if (domain != CUPTI_CB_DOMAIN_STATE) return;
+  auto *state = static_cast<const CUpti_StateData *>(data);
+  // State notifications can report unsupported HES/fallback or data loss
+  // asynchronously. Fail closed even when API return codes report success.
+  callback_error = state && state->notification.result != CUPTI_SUCCESS
+                     ? state->notification.result : -10;
+  std::fprintf(stderr, "CUPTI state id=%u result=%d message=%s\n",
+               static_cast<unsigned>(id), callback_error.load(),
+               state && state->notification.message ? state->notification.message : "(none)");
+}
 
 static void CUPTIAPI request_buffer(uint8_t **buffer, size_t *size,
                                     size_t *max_records) {
@@ -57,7 +78,7 @@ static void CUPTIAPI complete_buffer(CUcontext context, uint32_t stream,
   CUpti_Activity *record = nullptr;
   CUptiResult status;
   while ((status = cuptiActivityGetNextRecord(buffer, valid, &record)) == CUPTI_SUCCESS) {
-    if (record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) continue;
+    if (record->kind != TV_CUPTI_ACTIVITY_KIND) continue;
     auto *kernel = reinterpret_cast<TV_CUPTI_KERNEL_RECORD *>(record);
     if (!kernel->name || std::strlen(kernel->name) >= 256) {
       callback_error = -3;
@@ -92,8 +113,14 @@ extern "C" int tv_cupti_init() {
   // ABI and record type must be selected together from the matching SDK.
   // Reject any runtime version other than the explicitly compiled version.
   if (version != TV_CUPTI_API_VERSION) return -7;
-  status = cuptiActivityEnableHWTrace(1);
+  status = cuptiSubscribe(&state_subscriber, state_callback, nullptr);
   if (status != CUPTI_SUCCESS) return status;
+  status = cuptiEnableDomain(1, state_subscriber, CUPTI_CB_DOMAIN_STATE);
+  if (status != CUPTI_SUCCESS) return status;
+  if (TV_CUPTI_HARDWARE_TRACE) {
+    status = cuptiActivityEnableHWTrace(1);
+    if (status != CUPTI_SUCCESS) return status;
+  }
   // Configure buffer policy before callbacks/kinds, as required by CUPTI.
   // Diagnostic global-buffer builds have separate fingerprints and datasets.
   uint8_t per_thread_buffers = TV_CUPTI_PER_THREAD_BUFFERS;
@@ -113,7 +140,7 @@ extern "C" int tv_cupti_init() {
   if (status != CUPTI_SUCCESS) return status;
   status = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_RUNTIME);
   if (status != CUPTI_SUCCESS) return status;
-  status = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+  status = cuptiActivityEnable(TV_CUPTI_ACTIVITY_KIND);
   if (status != CUPTI_SUCCESS) return status;
   initialized = true;
   // Optional, separately fingerprinted diagnostic: drain while CUDA work is
@@ -141,6 +168,8 @@ extern "C" int tv_cupti_flush() {
 }
 
 extern "C" size_t tv_cupti_dropped() { return dropped; }
+extern "C" int tv_cupti_hardware_trace() { return TV_CUPTI_HARDWARE_TRACE; }
+extern "C" int tv_cupti_activity_kind() { return TV_CUPTI_ACTIVITY_KIND; }
 
 extern "C" size_t tv_cupti_count() {
   std::lock_guard<std::mutex> lock(records_mutex);
