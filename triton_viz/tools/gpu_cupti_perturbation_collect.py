@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import subprocess
 import time
+import os
+import signal
 from pathlib import Path
 
 from microbench.gpu.harness.measure import snapshot, assert_available
@@ -37,7 +39,22 @@ def declared_trials(workload="fma"):
     return trials
 
 
-def monitored_process(command, log, *, allowed_graphics=(), timeout=180):
+def _owned_group_sample(sample, child_pid):
+    """Keep original telemetry; classify only our fresh subprocess group."""
+    groups = {p["pid"]: os.getpgid(p["pid"]) for p in sample["processes"]}
+    sample["observed_process_groups"] = groups
+    return {
+        **sample,
+        "processes": [
+            dict(pid=child_pid if groups[p["pid"]] == child_pid else p["pid"])
+            for p in sample["processes"]
+        ],
+    }
+
+
+def monitored_process(
+    command, log, *, allowed_graphics=(), timeout=180, own_process_group=False
+):
     """Allow only this exact child PID; stop our child if contamination appears.
 
     NVML polling does not prove exclusivity between samples. Raw logs and failed
@@ -59,7 +76,12 @@ def monitored_process(command, log, *, allowed_graphics=(), timeout=180):
     samples, errors = [before], []
     started = time.monotonic()
     with log.open("x") as output:
-        child = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+        child = subprocess.Popen(
+            command,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=own_process_group,
+        )
         try:
             while True:
                 try:
@@ -70,7 +92,11 @@ def monitored_process(command, log, *, allowed_graphics=(), timeout=180):
                     ):
                         raise ValueError("GPU identity changed during trial")
                     assert_available(
-                        item, own_pid=child.pid, allowed_graphics=allowed_graphics
+                        _owned_group_sample(item, child.pid)
+                        if own_process_group
+                        else item,
+                        own_pid=child.pid,
+                        allowed_graphics=allowed_graphics,
                     )
                 except Exception as error:
                     errors.append(str(error))
@@ -81,11 +107,17 @@ def monitored_process(command, log, *, allowed_graphics=(), timeout=180):
                 time.sleep(0.1)
         finally:
             if child.poll() is None:
-                child.terminate()
+                if own_process_group:
+                    os.killpg(child.pid, signal.SIGTERM)
+                else:
+                    child.terminate()
                 try:
                     child.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    child.kill()
+                    if own_process_group:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    else:
+                        child.kill()
             child.wait()
         try:
             after = snapshot(0)
@@ -98,6 +130,7 @@ def monitored_process(command, log, *, allowed_graphics=(), timeout=180):
     return dict(
         returncode=child.returncode,
         child_pid=child.pid,
+        own_process_group=own_process_group,
         samples=samples,
         contaminated=bool(errors),
         rejection_reasons=errors,
