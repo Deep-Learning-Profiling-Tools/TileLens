@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from microbench.gpu.common.cache_controls import cache_declaration
+from microbench.gpu.harness.measure import snapshot
 from triton_viz.tools.gpu_cache_counter_audit import METRICS
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
@@ -20,6 +21,8 @@ def main(argv=None):
     if args.output.exists():
         raise ValueError("Use a fresh counter root; never overwrite failed controls")
     declaration = cache_declaration("capacity")
+    baseline = snapshot(0)
+    hardware = {key: baseline[key] for key in ("uuid", "driver", "index")}
     version = subprocess.run(
         [str(args.ncu), "--version"],
         check=True,
@@ -34,8 +37,6 @@ def main(argv=None):
                 str(args.ncu),
                 "--replay-mode",
                 "range",
-                "--profile-from-start",
-                "off",
                 "--cache-control",
                 "all",
                 "--clock-control",
@@ -64,6 +65,7 @@ def main(argv=None):
             role="control",
             matrix="capacity",
             declaration=declaration,
+            hardware=hardware,
             ncu_version=version,
             commands=commands,
             probe_sha256=hashlib.sha256(

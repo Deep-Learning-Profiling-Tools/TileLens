@@ -19,12 +19,16 @@ from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 def fit(report):
     declaration = cache_declaration("capacity")
+    hardware = report.get("hardware")
     if (
         report.get("role") != "control"
         or report.get("matrix") != "capacity"
         or not report.get("complete")
         or not report.get("replay_counts_consistent")
         or report.get("declaration") != declaration
+        or not isinstance(hardware, dict)
+        or not hardware.get("uuid")
+        or not hardware.get("driver")
     ):
         raise ValueError("Require complete declared capacity-control counters")
     expected = {
@@ -125,6 +129,7 @@ def fit(report):
     nested_mape = score(nested_values, all_indices)
     passed = ordinary[selected] <= 20 and nested_mape <= 20
     candidate = dict(
+        hardware=dict(hardware),
         method=selected,
         effective_associativity=final_way,
         capacity_bytes=declaration["l2_bytes"],

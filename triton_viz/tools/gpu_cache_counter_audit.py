@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import io
+import json
 from pathlib import Path
 
 from triton_viz.tools.gpu_cost_model_pipeline import _write
@@ -58,6 +59,23 @@ def parse_counters(text, *, range_mode=False):
 
 def audit_ranges(root, matrix="legacy"):
     declaration = cache_declaration(matrix)
+    hardware = None
+    provenance_error = None
+    if matrix == "capacity":
+        try:
+            manifest = json.loads((root / "manifest.json").read_text())
+            hardware = manifest["hardware"]
+            if (
+                manifest.get("role") != "control"
+                or manifest.get("matrix") != "capacity"
+                or manifest.get("declaration") != declaration
+                or not isinstance(hardware, dict)
+                or not hardware.get("uuid")
+                or not hardware.get("driver")
+            ):
+                raise ValueError("Unverified counter hardware or control declaration")
+        except (OSError, ValueError, KeyError) as exc:
+            provenance_error = str(exc)
     rows = []
     for mib in declaration["working_set_mib"]:
         for eviction in declaration["evictions"]:
@@ -72,8 +90,17 @@ def audit_ranges(root, matrix="legacy"):
             try:
                 text = path.read_text()
                 counters = parse_counters(text, range_mode=True)[0]
-                if "numerical=passed" not in log.read_text():
+                log_text = log.read_text()
+                if "numerical=passed" not in log_text:
                     raise ValueError("Missing numerical validation")
+                if (
+                    matrix == "capacity"
+                    and f"control cache_read: {mib} MiB, eviction={eviction}, block={declaration['block_elements']}, L2={declaration['l2_bytes']}, numerical=passed"
+                    not in log_text
+                ):
+                    raise ValueError(
+                        "Counter log differs from declared control geometry"
+                    )
                 record.update(
                     status="complete",
                     counters=counters,
@@ -82,7 +109,9 @@ def audit_ranges(root, matrix="legacy"):
             except (OSError, ValueError) as exc:
                 record.update(status="incomplete", error=str(exc))
             rows.append(record)
-    complete = all(row["status"] == "complete" for row in rows)
+    complete = provenance_error is None and all(
+        row["status"] == "complete" for row in rows
+    )
     reliable = complete and all(
         row["counters"]["replay_count_disagreement"] <= 0.05 for row in rows
     )
@@ -98,6 +127,8 @@ def audit_ranges(root, matrix="legacy"):
         role="control",
         matrix=matrix,
         declaration=declaration,
+        hardware=hardware,
+        provenance_error=provenance_error,
         rows=rows,
         complete=complete,
         replay_counts_consistent=bool(reliable),

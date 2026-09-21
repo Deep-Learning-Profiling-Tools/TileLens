@@ -8,12 +8,16 @@ from triton_viz.tools import gpu_cache_capacity_collect as collector
 
 def test_all_counter_commands_are_frozen_and_never_change_clocks(tmp_path, monkeypatch):
     commands = []
+    monkeypatch.setattr(
+        collector, "snapshot", lambda _: dict(uuid="test", driver="test", index=0)
+    )
 
     def run(command, **kwargs):
         if "--version" in command:
             return SimpleNamespace(stdout="test ncu", returncode=0)
         commands.append(command)
         assert command[command.index("--replay-mode") + 1] == "range"
+        assert "--profile-from-start" not in command
         assert command[command.index("--clock-control") + 1] == "none"
         assert command[command.index("--cache-control") + 1] == "all"
         assert "duration" not in command[command.index("--metrics") + 1]
@@ -30,6 +34,10 @@ def test_all_counter_commands_are_frozen_and_never_change_clocks(tmp_path, monke
 
 
 def test_counter_timeout_preserves_manifest_and_failed_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        collector, "snapshot", lambda _: dict(uuid="test", driver="test", index=0)
+    )
+
     def run(command, **kwargs):
         if "--version" in command:
             return SimpleNamespace(stdout="test ncu", returncode=0)

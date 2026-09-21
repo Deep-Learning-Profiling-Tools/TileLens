@@ -13,6 +13,7 @@ def report():
         complete=True,
         replay_counts_consistent=True,
         declaration=declaration,
+        hardware=dict(uuid="test", driver="test", index=0),
         rows=[
             dict(
                 working_set_mib=mib,

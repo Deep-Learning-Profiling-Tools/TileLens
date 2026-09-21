@@ -1,8 +1,9 @@
 """Declared control-only cache experiment; range replay is the verified path.
 
-No timing from this profiler run may enter latency calibration. Use ncu with
---profile-from-start off --cache-control none --clock-control none and preserve
-the complete application setup on every replay pass. Application-replay
+No timing from this profiler run may enter latency calibration. Range replay
+uses the explicit driver ProfilerStart/Stop markers, --cache-control all and
+--clock-control none; --profile-from-start is not supported in this mode.
+Preserve the complete application setup on every replay pass. Application-replay
 diagnostics on GB10 can stall; their failures remain separate artifacts.
 """
 
@@ -54,6 +55,8 @@ def main(argv=None):
     declaration = cache_declaration(args.matrix)
     if args.working_set_mib not in declaration["working_set_mib"]:
         raise ValueError("Working set is outside the declared control matrix")
+    if args.matrix == "capacity" and args.block != declaration["block_elements"]:
+        raise ValueError("Capacity controls require their declared block geometry")
 
     import torch
     from microbench.gpu.harness.measure import assert_available, snapshot
