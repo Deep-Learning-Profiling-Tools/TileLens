@@ -18,10 +18,40 @@ def load_cases(suite, role):
         "stability",
         "pressure",
         "resource_transfer",
+        "composition_component",
     }:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "composition_component":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "composition_component_control.json").read_text())
+        if (data["schema"], data["role"]) != (
+            "triton-viz.gpu-composition-component-controls.v1",
+            "control",
+        ):
+            raise ValueError("Invalid composition component declaration")
+        return [
+            dict(
+                id=f"component_{dtype}_{precision}_{bm}x{bn}x{bk}_w{warps}_s{stages}",
+                kind="geometry_dot",
+                programs=data["programs"],
+                dtype=dtype,
+                precision=precision,
+                bm=bm,
+                bn=bn,
+                bk=bk,
+                num_warps=warps,
+                num_stages=stages,
+                repeat=data["repeat"],
+                reuse="none",
+                cv_group=f"resource_composition_{bm}x{bn}x32",
+            )
+            for (dtype, precision), warps, stages, (bm, bn, bk) in product(
+                data["precisions"], data["warps"], data["stages"], data["tiles"]
+            )
+        ]
     if suite == "resource_transfer":
         if role == "holdout":
             return []

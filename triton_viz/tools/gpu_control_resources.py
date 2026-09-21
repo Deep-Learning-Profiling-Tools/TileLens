@@ -19,7 +19,13 @@ from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
 def selected_controls(suite):
-    if suite not in {"geometry", "structure", "pressure", "resource_transfer"}:
+    if suite not in {
+        "geometry",
+        "structure",
+        "pressure",
+        "resource_transfer",
+        "composition_component",
+    }:
         raise ValueError(
             "Only declared geometry/structure/pressure/resource_transfer controls are supported"
         )
@@ -33,7 +39,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("geometry", "structure", "pressure", "resource_transfer"),
+        choices=(
+            "geometry",
+            "structure",
+            "pressure",
+            "resource_transfer",
+            "composition_component",
+        ),
         required=True,
     )
     parser.add_argument("--output", type=Path, required=True)

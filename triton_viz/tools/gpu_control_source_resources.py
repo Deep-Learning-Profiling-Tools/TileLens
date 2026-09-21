@@ -16,7 +16,9 @@ from triton_viz.tools.gpu_cost_model_pipeline import _write
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--suite", choices=("pressure", "resource_transfer"), required=True
+        "--suite",
+        choices=("pressure", "resource_transfer", "composition_component"),
+        required=True,
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capture-loops", action="store_true")
