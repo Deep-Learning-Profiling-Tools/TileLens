@@ -7,6 +7,7 @@ from pathlib import Path
 from microbench.gpu.common.cases import load_cases
 from triton_viz.performance.calibration import stable_digest
 from triton_viz.performance.gpu_resources import (
+    source_dot_ancestry,
     source_liveness_features,
     source_resource_features,
 )
@@ -70,6 +71,7 @@ def main(argv=None):
                     ood_reasons=reasons,
                     source_liveness=liveness,
                     dot_shapes=shapes,
+                    dot_ancestry=source_dot_ancestry(source),
                     operation_counts=dict(Counter(e["op"] for e in source["events"])),
                     source_digest=stable_digest(source),
                     program_count=source["program_count"],

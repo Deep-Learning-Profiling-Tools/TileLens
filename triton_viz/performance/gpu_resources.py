@@ -10,6 +10,43 @@ from __future__ import annotations
 import math
 
 
+def source_dot_ancestry(source):
+    """Export observed producer-dot ancestry, not compiler region inference.
+
+    Transposes break the path as in the pinned MMA slice filter. Dynamic loop
+    iterations can still appear connected: these descriptors do not establish
+    distinct static dots or common compiler regions. Preserve sequence IDs so
+    control audits can verify those additional conditions independently.
+    """
+    ancestry, programs, rows = {}, {}, []
+    previous = None
+    for event in source["events"]:
+        seq = event["seq"]
+        if previous is not None and seq <= previous:
+            raise ValueError("Require increasing unique source sequence IDs")
+        previous = seq
+        parents = set()
+        for dep in event["dependencies"]:
+            if dep not in ancestry or programs[dep] != event["program"]:
+                raise ValueError("Invalid or cross-program source dependency")
+            parents.update(ancestry[dep])
+        if event["op"] in {"trans", "transpose"}:
+            parents.clear()
+        if event["op"] == "dot":
+            rows.append(
+                dict(
+                    seq=seq,
+                    program=event["program"],
+                    ancestor_dot_seqs=sorted(parents),
+                    input_shapes=event["input_shapes"],
+                )
+            )
+            parents.add(seq)
+        ancestry[seq] = parents
+        programs[seq] = event["program"]
+    return rows
+
+
 def source_liveness_features(source):
     """Measure logical SSA output lifetimes in the observed program order.
 

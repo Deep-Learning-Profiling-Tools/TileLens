@@ -56,3 +56,26 @@ def test_layout_rejects_unsupported_shapes(args):
 def test_layout_does_not_assume_compiler_policy_is_stable():
     with pytest.raises(ValueError, match="version"):
         initial_ieee_dot_layout(64, 64, 32, 4, compiler_version="unknown")
+
+
+@pytest.mark.parametrize(
+    "m,n,warps,single,chain",
+    [
+        (32, 64, 4, [1, 4], [1, 4]),
+        (64, 64, 4, [2, 2], [4, 1]),
+        (32, 64, 8, [2, 4], [1, 8]),
+        (64, 64, 8, [2, 4], [8, 1]),
+    ],
+)
+def test_mma_v2_connectivity_changes_warp_ownership(m, n, warps, single, chain):
+    from triton_viz.performance.gpu_layout import mma_v2_warp_layout
+
+    for connected, expected in ((False, single), (True, chain)):
+        assert (
+            mma_v2_warp_layout(
+                m, n, warps, chained_dot=connected, compiler_version="3.7.0"
+            )
+            == expected
+        )
+    with pytest.raises(ValueError, match="connectivity"):
+        mma_v2_warp_layout(m, n, warps, chained_dot=None, compiler_version="3.7.0")

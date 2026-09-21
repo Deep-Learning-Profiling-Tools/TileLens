@@ -1,14 +1,47 @@
-"""Source-only, versioned initial blocked-dot layout descriptors.
+"""Source-only, versioned dot layout descriptors.
 
 This describes Triton 3.7's initial rank-2 conversion policy, not all subsequent
 layout optimizations or physical register allocation. Validate final layouts on
 controls before using the descriptors in a calibrated prediction model.
 
 Policy references (Triton v3.7.0): TritonToTritonGPUPass.cpp TritonDotPattern,
-and TritonGPUAttrDefs.td BlockedEncodingAttr shape-based builder.
+TritonGPUAttrDefs.td BlockedEncodingAttr shape-based builder, and
+AccelerateMatmul.cpp warpsPerTileV2. Connectivity and layout eligibility remain
+explicit preconditions, not predictions from an operator name.
 """
 
 import math
+
+
+def mma_v2_warp_layout(m, n, warps, *, chained_dot, compiler_version):
+    """Pinned rank-2 policy, conditional on a verified same-region dot chain.
+
+    Mirrors warpsPerTileV2 in Triton 3.7 AccelerateMatmul.cpp. This is not
+    MMA eligibility inference. Callers must establish the tensor path and
+    connectivity; dynamic loop repetition alone is not a compiler dot chain.
+    Existing layouts in heterogeneous chains require separate propagation.
+    """
+    if compiler_version != "3.7.0":
+        raise ValueError("Unvalidated compiler layout policy version")
+    if not isinstance(chained_dot, bool):
+        raise ValueError("Require explicit verified dot connectivity")
+    if any(
+        isinstance(x, bool) or not isinstance(x, int) or x < 1 or x & (x - 1)
+        for x in (m, n, warps)
+    ):
+        raise ValueError("Require power-of-two geometry and warp count")
+    if warps not in (4, 8) or m < 16 or n < 8:
+        raise ValueError("Outside validated rank-2 MMA policy domain")
+    if chained_dot:
+        return [warps, 1] if m >= n else [1, warps]
+    reps = [(m + 15) // 16, (n + 7) // 8]
+    layout = [1, 1]
+    while math.prod(layout) < warps:
+        axis = 0 if reps[0] >= reps[1] else 1
+        layout[axis] *= 2
+        if reps[axis] != 1:
+            reps[axis] //= 2
+    return layout
 
 
 def initial_ieee_dot_layout(m, n, k, warps, *, compiler_version):

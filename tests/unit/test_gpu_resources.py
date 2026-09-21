@@ -4,7 +4,34 @@ import pytest
 from triton_viz.performance.gpu_resources import (
     source_resource_features,
     source_liveness_features,
+    source_dot_ancestry,
 )
+
+
+def test_dot_ancestry_distinguishes_composition_from_independent_dots():
+    events = [
+        dict(
+            seq=i,
+            dependencies=deps,
+            op=op,
+            program=[0],
+            input_shapes=[[32, 32], [32, 64]],
+        )
+        for i, op, deps in [
+            (0, "dot", []),
+            (1, "reduce_max", [0]),
+            (2, "binary_op", [0, 1]),
+            (3, "dot", [2]),
+            (4, "dot", []),
+            (5, "trans", [3]),
+            (6, "dot", [5]),
+        ]
+    ]
+    rows = source_dot_ancestry(dict(events=events))
+    assert [r["ancestor_dot_seqs"] for r in rows] == [[], [0], [], []]
+    events[-1]["program"] = [1]
+    with pytest.raises(ValueError, match="cross-program"):
+        source_dot_ancestry(dict(events=events))
 
 
 def test_geometry_source_observation_cli_preserves_existing_output(tmp_path):
