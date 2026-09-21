@@ -33,6 +33,7 @@ def main(argv=None):
         choices=(
             "coverage",
             "pressure",
+            "pressure_pipeline",
             "resource_transfer",
             "composition_component",
             "geometry",

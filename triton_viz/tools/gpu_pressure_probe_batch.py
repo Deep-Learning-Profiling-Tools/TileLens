@@ -26,6 +26,7 @@ def main(argv=None):
         "--suite",
         choices=(
             "pressure",
+            "pressure_pipeline",
             "resource_transfer",
             "composition_component",
             "geometry",

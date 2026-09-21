@@ -1,0 +1,116 @@
+import copy
+
+import pytest
+
+from triton_viz.tools.gpu_cold_resource_diagnostic import SERVICE_FEATURES
+from triton_viz.tools.gpu_spill_transfer_audit import FEATURES
+from triton_viz.tools.gpu_cold_spill_diagnostic import request_prediction, validate
+
+
+def data():
+    counters, latencies = [], []
+    for g in range(4):
+        source = dict(
+            role="control",
+            compiler_version="3.7.0",
+            source_precision=[["fp16", "fp16", "ieee"]],
+            dot_shapes=[[[32 * 2**g, 32], [32, 64]]],
+            source_features={
+                **dict.fromkeys(FEATURES, 1),
+                "threads_per_program": 128,
+                "dots_per_program": 5,
+                "max_dot_m": 32 * 2**g,
+            },
+        )
+        counters.append(
+            dict(
+                **source,
+                case=dict(id=f"c{g}", cv_group=str(g), kind="geometry_dot"),
+                counter_bytes_per_thread=dict(LDL=64 * (g + 1), STL=32 * (g + 1)),
+            )
+        )
+        for kind in ("geometry_dot", "structure_composition"):
+            latencies.append(
+                dict(
+                    **source,
+                    case=dict(id=f"l{g}_{kind}", cv_group=str(g), kind=kind),
+                    eligible_for_fit=False,
+                    latency_us=float(10 + g),
+                    pricing_features={
+                        **dict.fromkeys(SERVICE_FEATURES, 0),
+                        "launch": 1,
+                        "global_sectors": 10 * (g + 1),
+                        "waves": 1,
+                    },
+                )
+            )
+    return counters, latencies
+
+
+def test_outer_counter_and_timing_labels_cannot_affect_selection():
+    counters, latencies = data()
+    first = validate(counters, latencies)
+    changed_c, changed_l = copy.deepcopy((counters, latencies))
+    changed_c[0]["counter_bytes_per_thread"] = dict(LDL=999999, STL=999999)
+    for row in changed_l:
+        if row["case"]["cv_group"] == "0":
+            row["latency_us"] = 999999
+    second = validate(changed_c, changed_l)
+    assert first["folds"][0] == second["folds"][0]
+    for name in first["ordinary"]:
+        assert [
+            r["prediction_us"]
+            for r in first["ordinary"][name]["rows"]
+            if r["group"] == "0"
+        ] == [
+            r["prediction_us"]
+            for r in second["ordinary"][name]["rows"]
+            if r["group"] == "0"
+        ]
+    assert first["count"] == 8 and len(first["nested_rows"]) == 8
+
+
+def test_compositions_retained_with_explicit_baseline_not_fake_requests():
+    result = validate(*data())
+    base = {r["id"]: r for r in result["ordinary"]["source"]["rows"]}
+    fallback = [
+        r
+        for r in result["ordinary"]["source_plus_requests"]["rows"]
+        if r["source_fallback"]
+    ]
+    assert len(fallback) == 4
+    for row in fallback:
+        assert row["prediction_us"] == base[row["id"]]["prediction_us"]
+        assert "spill_mapping_unmodeled_composition" in row["ood_reasons"]
+    assert result["eligible_for_fit"] is False and result["released_model"] is None
+
+
+def test_holdout_and_shared_geometry_partition_leaks_rejected():
+    counters, latencies = data()
+    counters[0]["role"] = "holdout"
+    with pytest.raises(ValueError, match="control"):
+        validate(counters, latencies)
+    counters[0]["role"] = "control"
+    counters[0]["case"]["cv_group"] = "another"
+    with pytest.raises(ValueError, match="partitions"):
+        validate(counters, latencies)
+
+
+def test_request_prediction_needs_no_query_counter_or_compiler_artifact():
+    counters, _ = data()
+    query = counters.pop()
+    source_only = {
+        k: query[k]
+        for k in (
+            "source_features",
+            "source_precision",
+            "dot_shapes",
+            "compiler_version",
+        )
+    }
+    first = request_prediction(counters, source_only)
+    query["counter_bytes_per_thread"] = {"LDL": float("nan"), "STL": -1}
+    query["local_bytes_per_thread"] = 99999999
+    query["latency_us"] = 99999999
+    assert request_prediction(counters, query) == first
+    assert first["ood_reasons"]

@@ -8,14 +8,15 @@ from triton_viz.tools import gpu_pressure_probe_batch as batch
 
 
 @pytest.mark.parametrize("unstable", [False, True])
+@pytest.mark.parametrize("suite", ["pressure", "pressure_pipeline"])
 def test_pressure_batch_retains_declared_matrix_and_stops_on_instability(
-    tmp_path, monkeypatch, unstable
+    tmp_path, monkeypatch, unstable, suite
 ):
     called = []
 
     def run(command, **kwargs):
         assert "--graph-samples" in command
-        assert command[command.index("--suite") + 1] == "pressure"
+        assert command[command.index("--suite") + 1] == suite
         output = Path(command[command.index("--output") + 1])
         called.append(output)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,7 @@ def test_pressure_batch_retains_declared_matrix_and_stops_on_instability(
     monkeypatch.setattr(batch.subprocess, "run", run)
     output = tmp_path / "batch"
     args = ["--library", str(tmp_path / "bridge.so"), "--output", str(output)]
+    args.extend(["--suite", suite])
     if unstable:
         with pytest.raises(RuntimeError, match="unstable"):
             batch.main(args)
