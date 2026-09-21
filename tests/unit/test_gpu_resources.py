@@ -1,9 +1,17 @@
 import pytest
 
+
 from triton_viz.performance.gpu_resources import (
     source_resource_features,
     source_liveness_features,
 )
+
+
+def test_geometry_source_observation_cli_preserves_existing_output(tmp_path):
+    from triton_viz.tools.gpu_control_source_resources import main
+
+    with pytest.raises(ValueError, match="fresh source observation"):
+        main(["--suite", "geometry", "--capture-loops", "--output", str(tmp_path)])
 
 
 def source(*, m=256, n=128, k=32, warps=4, dtype="fp16"):
