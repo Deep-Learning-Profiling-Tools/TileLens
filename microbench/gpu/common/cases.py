@@ -18,12 +18,44 @@ def load_cases(suite, role):
         "stability",
         "pressure",
         "pressure_pipeline",
+        "pressure_k_transfer",
         "resource_transfer",
         "composition_component",
     }:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "pressure_k_transfer":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "pressure_k_transfer_control.json").read_text())
+        if (
+            data["schema"],
+            data["role"],
+            data["template_suite"],
+            data["k_values"],
+            data["stages"],
+        ) != (
+            "triton-viz.gpu-pressure-k-transfer-controls.v1",
+            "control",
+            "pressure",
+            [16, 64],
+            [1, 2],
+        ):
+            raise ValueError("Invalid matched K-transfer declaration")
+        templates = load_cases("pressure", "control")
+        if any(c["bk"] != 32 or c["num_stages"] != 1 for c in templates):
+            raise ValueError("K-transfer requires original K32 stage-1 templates")
+        return [
+            {
+                **c,
+                "id": f"{c['id']}_k{k}_s{s}",
+                "bk": k,
+                "num_stages": s,
+                "cv_group": f"pressure_{c['bm']}x{c['bn']}x{k}",
+            }
+            for c, k, s in product(templates, data["k_values"], data["stages"])
+        ]
     if suite == "pressure_pipeline":
         if role == "holdout":
             return []

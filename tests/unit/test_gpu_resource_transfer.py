@@ -6,6 +6,37 @@ from microbench.gpu.common.cases import load_cases
 from triton_viz.tools.gpu_resource_transfer_audit import FEATURES, audit, train, predict
 
 
+def test_k_transfer_matrix_preserves_all_original_cross_factors():
+    from triton_viz.tools.gpu_control_resources import selected_controls
+
+    original = load_cases("pressure", "control")
+    rows = selected_controls("pressure_k_transfer")
+    assert len(rows) == len({r["id"] for r in rows}) == 128
+    assert load_cases("pressure_k_transfer", "holdout") == []
+    for case in original:
+        children = [r for r in rows if r["id"].startswith(case["id"] + "_k")]
+        assert {(r["bk"], r["num_stages"]) for r in children} == {
+            (16, 1),
+            (16, 2),
+            (64, 1),
+            (64, 2),
+        }
+        for child in children:
+            assert {
+                k: v
+                for k, v in child.items()
+                if k not in {"id", "bk", "num_stages", "cv_group"}
+            } == {
+                k: v
+                for k, v in case.items()
+                if k not in {"id", "bk", "num_stages", "cv_group"}
+            }
+            assert (
+                child["cv_group"]
+                == f"pressure_{child['bm']}x{child['bn']}x{child['bk']}"
+            )
+
+
 def test_layout_descriptors_ignore_labels_and_mark_tensor_gap():
     from triton_viz.tools.gpu_resource_transfer_audit import layout_features
 
@@ -29,6 +60,48 @@ def test_layout_descriptors_ignore_labels_and_mark_tensor_gap():
     assert features["max_simt_operand_fragment_words"] == 0
     with pytest.raises(ValueError, match="version"):
         layout_features(row, compiler_version="unknown")
+
+
+@pytest.mark.parametrize(
+    "dtype,precision,lo,hi",
+    [("fp16", "ieee", 96, 96), ("bf16", "ieee", 96, 96), ("fp32", "tf32", 192, 192)],
+)
+def test_mma_materialization_does_not_read_compiler_labels_or_dynamic_ancestry(
+    dtype, precision, lo, hi
+):
+    from triton_viz.tools.gpu_resource_transfer_audit import (
+        mma_materialization_features,
+    )
+
+    row = dict(
+        source_features=dict(threads_per_program=128),
+        source_liveness={},
+        program_count=48,
+        operation_counts=dict(dot=240),
+        dot_shapes=[[[256, 32], [32, 128]]],
+        source_precision=[[dtype, dtype, precision]],
+        case=object(),
+        dot_ancestry=object(),
+        artifacts=object(),
+        registers_per_thread=object(),
+        local_bytes_per_thread=object(),
+        median_us=object(),
+    )
+    result = mma_materialization_features(row, compiler_version="3.7.0")
+    assert result["mma_materialization_available"] == 1
+    assert result["min_mma_operand_fragment_words"] == lo
+    assert result["max_mma_operand_fragment_words"] == hi
+    assert result["min_mma_accumulator_fragment_words"] == 256
+    assert result["max_mma_accumulator_fragment_words"] == 256
+    row["dot_shapes"] = [[[16, 32], [32, 8]]]
+    assert (
+        mma_materialization_features(row, compiler_version="3.7.0")[
+            "mma_materialization_available"
+        ]
+        == 0
+    )
+    with pytest.raises(ValueError, match="version"):
+        mma_materialization_features(row, compiler_version="unknown")
 
 
 def report():
@@ -61,7 +134,8 @@ def test_fold_training_excludes_entire_validation_geometry():
     assert audit(modified)["rows"][0]["prediction"] == result["rows"][0]["prediction"]
 
 
-def test_layout_fold_prediction_cannot_read_its_validation_allocation():
+@pytest.mark.parametrize("feature_set", ["initial_layout", "mma_materialization"])
+def test_layout_fold_prediction_cannot_read_its_validation_allocation(feature_set):
     data = report()
     data["compiler_version"] = "3.7.0"
     for n, row in enumerate(data["rows"]):
@@ -73,10 +147,10 @@ def test_layout_fold_prediction_cannot_read_its_validation_allocation():
             source_precision=[["fp32", "fp32", "ieee"]],
         )
         row["source_features"]["threads_per_program"] = 128
-    first = audit(data, feature_set="initial_layout")
+    first = audit(data, feature_set=feature_set)
     data["rows"][0]["local_bytes_per_thread"] = 1000000
     data["rows"][0]["median_us"] = object()
-    second = audit(data, feature_set="initial_layout")
+    second = audit(data, feature_set=feature_set)
     assert first["rows"][0]["prediction"] == second["rows"][0]["prediction"]
     assert "case0" not in first["rows"][0]["training_ids"]
 

@@ -22,6 +22,7 @@ def main(argv=None):
             "geometry",
             "pressure",
             "pressure_pipeline",
+            "pressure_k_transfer",
             "resource_transfer",
             "composition_component",
         ),

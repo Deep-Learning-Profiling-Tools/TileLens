@@ -1,0 +1,7 @@
+{
+  "schema": "triton-viz.gpu-pressure-k-transfer-controls.v1",
+  "role": "control",
+  "template_suite": "pressure",
+  "k_values": [16, 64],
+  "stages": [1, 2]
+}

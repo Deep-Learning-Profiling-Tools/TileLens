@@ -41,7 +41,7 @@ def source_geometry_partition(rows):
     return {row["case"]["id"]: names[root(i)] for i, row in enumerate(rows)}
 
 
-def train(rows, *, depth, leaf):
+def train(rows, *, depth, leaf, feature_names=FEATURES):
     if (
         isinstance(depth, bool)
         or not isinstance(depth, int)
@@ -51,7 +51,12 @@ def train(rows, *, depth, leaf):
         or leaf < 1
     ):
         raise ValueError("Invalid tree limits")
-    checked = baseline.train(rows, FEATURES)
+    if tuple(feature_names) not in (
+        FEATURES,
+        baseline.FEATURE_SETS["mma_materialization"],
+    ):
+        raise ValueError("Unknown resource feature schema")
+    checked = baseline.train(rows, feature_names)
 
     def build(group, remaining):
         values = [math.log1p(r["local_bytes_per_thread"]) for r in group]
@@ -68,7 +73,7 @@ def train(rows, *, depth, leaf):
         if remaining == 0 or len(group) < 2 * leaf or cost == 0:
             return node
         best = None
-        for key in FEATURES:
+        for key in feature_names:
             unique = sorted({r["source_features"][key] for r in group})
             for a, b in zip(unique, unique[1:]):
                 threshold = (a + b) / 2
@@ -98,7 +103,7 @@ def train(rows, *, depth, leaf):
     for row in rows:
         strata.setdefault(json.dumps(row["source_precision"]), []).append(row)
     return dict(
-        feature_names=list(FEATURES),
+        feature_names=list(feature_names),
         domain=checked["domain"],
         trees={key: build(group, depth) for key, group in strata.items()},
     )
@@ -106,13 +111,17 @@ def train(rows, *, depth, leaf):
 
 def predict(model, features, precision):
     # This API cannot read a case ID, compiler artifact, label or latency.
-    if model.get("feature_names") != list(FEATURES):
+    feature_names = model.get("feature_names")
+    if feature_names not in (
+        list(FEATURES),
+        list(baseline.FEATURE_SETS["mma_materialization"]),
+    ):
         raise ValueError("Resource feature schema mismatch")
-    if any(not math.isfinite(features[k]) or features[k] < 0 for k in FEATURES):
+    if any(not math.isfinite(features[k]) or features[k] < 0 for k in feature_names):
         raise ValueError("Invalid source features")
     reasons = [
         f"outside_training_domain:{k}"
-        for k in FEATURES
+        for k in feature_names
         if not model["domain"][k][0] <= features[k] <= model["domain"][k][1]
     ]
     node = model["trees"].get(json.dumps(precision))
@@ -127,7 +136,7 @@ def predict(model, features, precision):
     return dict(prediction=node["prediction"], ood_reasons=reasons)
 
 
-def validate(rows):
+def validate(rows, *, feature_names=FEATURES):
     groups = sorted({r["case"]["cv_group"] for r in rows})
     if len(groups) < 3 or len({r["case"]["id"] for r in rows}) != len(rows):
         raise ValueError("Require unique controls in three or more groups")
@@ -141,7 +150,9 @@ def validate(rows):
                 if inner == outer:
                     continue
                 fit_rows = [r for r in training if r["case"]["cv_group"] != inner]
-                model = train(fit_rows, depth=depth, leaf=leaf)
+                model = train(
+                    fit_rows, depth=depth, leaf=leaf, feature_names=feature_names
+                )
                 for row in training:
                     if row["case"]["cv_group"] != inner:
                         continue
@@ -164,7 +175,12 @@ def validate(rows):
         selected = min(
             scores, key=lambda r: (r["log1p_local_mae"], r["depth"], -r["leaf"])
         )
-        model = train(training, depth=selected["depth"], leaf=selected["leaf"])
+        model = train(
+            training,
+            depth=selected["depth"],
+            leaf=selected["leaf"],
+            feature_names=feature_names,
+        )
         folds.append(
             dict(
                 held_group=outer,
@@ -217,6 +233,11 @@ def main(argv=None):
     parser.add_argument("--source-root", type=Path, nargs="+", required=True)
     parser.add_argument("--resource-root", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--feature-set",
+        choices=("initial_layout", "mma_materialization"),
+        default="initial_layout",
+    )
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require fresh output")
@@ -274,18 +295,21 @@ def main(argv=None):
             case=r["case"],
             source_precision=r["source_precision"],
             ood_reasons=r["ood_reasons"],
-            source_features=baseline.layout_features(
-                r, compiler_version=report["compiler_version"]
-            ),
+            source_features=(
+                baseline.mma_materialization_features
+                if args.feature_set == "mma_materialization"
+                else baseline.layout_features
+            )(r, compiler_version=report["compiler_version"]),
             **{k: r[k] for k in baseline.LABELS},
         )
         for r in report["rows"]
     ]
-    result = validate(rows)
+    result = validate(rows, feature_names=baseline.FEATURE_SETS[args.feature_set])
+    result["feature_set"] = args.feature_set
     result["compiler_version"] = report["compiler_version"]
     result["label_provenance"] = label_provenance
     result["grouping"] = grouping
-    reference = baseline.audit(report, feature_set="initial_layout")
+    reference = baseline.audit(report, feature_set=args.feature_set)
     result["nearest_control_baseline"] = {
         k: reference[k]
         for k in ("count", "resource_mae", "allocation_confusion", "ood_count")

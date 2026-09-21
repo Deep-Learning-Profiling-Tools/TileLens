@@ -36,15 +36,21 @@ def test_source_resource_mapping_can_represent_nonmonotonic_stage_effect():
         assert row["id"] not in fold["training_ids"]
 
 
-def test_outer_labels_do_not_change_fold_model_or_hyperparameter_selection():
+@pytest.mark.parametrize("feature_set", ["initial_layout", "mma_materialization"])
+def test_outer_labels_do_not_change_fold_model_or_hyperparameter_selection(feature_set):
+    from triton_viz.tools.gpu_resource_transfer_audit import FEATURE_SETS
+
     rows = controls()
-    first = validate(rows)["folds"][0]
+    names = FEATURE_SETS[feature_set]
+    for row in rows:
+        row["source_features"] = {**dict.fromkeys(names, 1), **row["source_features"]}
+    first = validate(rows, feature_names=names)["folds"][0]
     changed = copy.deepcopy(rows)
     for row in changed:
         if row["case"]["cv_group"] == "0":
             row["local_bytes_per_thread"] = 9999
             row["registers_per_thread"] = 1
-    second = validate(changed)["folds"][0]
+    second = validate(changed, feature_names=names)["folds"][0]
     assert first == second
 
 

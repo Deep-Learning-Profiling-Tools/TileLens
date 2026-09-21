@@ -40,6 +40,81 @@ FEATURE_SETS["initial_layout"] = FEATURE_SETS["live_structure"] + (
     "max_simt_accumulator_fragment_words",
     "max_simt_operand_fragment_words",
 )
+FEATURE_SETS["mma_materialization"] = FEATURE_SETS["initial_layout"] + (
+    "mma_materialization_available",
+    "min_mma_accumulator_fragment_words",
+    "max_mma_accumulator_fragment_words",
+    "min_mma_operand_fragment_words",
+    "max_mma_operand_fragment_words",
+)
+
+
+def mma_materialization_features(row, *, compiler_version):
+    """Describe both pinned connectivity hypotheses without choosing a lowering.
+
+    Taking extrema across the connected/unconnected policies avoids inferring
+    static compiler regions from dynamic ancestry. These are materialization
+    descriptors, NOT bounds on allocated registers or simultaneous liveness.
+    Unknown precision or partial/broadcast tiles retain an unavailable flag;
+    no controls are removed and no compiler labels enter these features.
+    """
+    from triton_viz.performance.gpu_layout import mma_v2_fragments
+
+    features = layout_features(row, compiler_version=compiler_version)
+    precision = row["source_precision"]
+    dtype = next(
+        (
+            dtype
+            for signature, dtype in (
+                ([["fp32", "fp32", "tf32"]], "tf32"),
+                ([["fp16", "fp16", "ieee"]], "fp16"),
+                ([["bf16", "bf16", "ieee"]], "bf16"),
+            )
+            if signature == precision
+        ),
+        None,
+    )
+    result = dict.fromkeys(FEATURE_SETS["mma_materialization"][-5:], 0)
+    threads = features["threads_per_program"]
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads <= 0:
+        raise ValueError("Require a positive integer source thread count")
+    if threads % 32:
+        raise ValueError("Nonintegral source warp count")
+    if dtype is None:
+        return {**features, **result}
+    alternatives = []
+    for chained in (False, True):
+        fragments = []
+        for a, b in row["dot_shapes"]:
+            try:
+                fragments.append(
+                    mma_v2_fragments(
+                        a[0],
+                        b[1],
+                        a[1],
+                        threads // 32,
+                        input_dtype=dtype,
+                        chained_dot=chained,
+                        compiler_version=compiler_version,
+                    )
+                )
+            except ValueError:
+                return {**features, **result}
+        alternatives.append(
+            dict(
+                accumulator=max(f["accumulator_words_per_thread"] for f in fragments),
+                operand=max(
+                    f["a_words_per_thread"] + f["b_words_per_thread"] for f in fragments
+                ),
+            )
+        )
+    result["mma_materialization_available"] = 1
+    for kind in ("accumulator", "operand"):
+        for name, reduce in (("min", min), ("max", max)):
+            result[f"{name}_mma_{kind}_fragment_words"] = reduce(
+                value[kind] for value in alternatives
+            )
+    return {**features, **result}
 
 
 def layout_features(row, *, compiler_version):
@@ -286,6 +361,11 @@ def audit(report, *, feature_set="base"):
     if feature_set == "initial_layout":
         for row, original in zip(rows, report["rows"]):
             row["source_features"] = layout_features(
+                original, compiler_version=report.get("compiler_version")
+            )
+    if feature_set == "mma_materialization":
+        for row, original in zip(rows, report["rows"]):
+            row["source_features"] = mma_materialization_features(
                 original, compiler_version=report.get("compiler_version")
             )
     groups = sorted({r["case"]["cv_group"] for r in rows})
