@@ -33,16 +33,22 @@ def test_region_candidate_preserves_all_rows_and_both_nested_exclusions():
         row["instructions_per_warp"] = dict(
             LDL=2, STL=1, executed=value + 10, issued=value + 10
         )
-    first = validate(counters, latencies, region_instruction_rows=instructions)
+    first = validate(
+        counters, latencies, region_instruction_rows=instructions, issued_dot=True
+    )
     changed = copy.deepcopy(instructions)
     for row in changed:
         if row["case"]["cv_group"] == "0":
             row["instructions_per_warp"]["executed"] += 99999
-    second = validate(counters, latencies, region_instruction_rows=changed)
+    second = validate(
+        counters, latencies, region_instruction_rows=changed, issued_dot=True
+    )
     assert first["folds"][0] == second["folds"][0]
     predictions = first["ordinary"]["source_plus_region_instruction_work"]["rows"]
     assert len(predictions) == 8 and not any(r["source_fallback"] for r in predictions)
     assert first["eligible_for_fit"] is False
+    issued = first["ordinary"]["source_plus_region_issued_dot_work"]["rows"]
+    assert len(issued) == 8 and not any(r["source_fallback"] for r in issued)
     for fold in first["folds"]:
         assert all(
             not key.startswith("l" + fold["held_group"] + "_")

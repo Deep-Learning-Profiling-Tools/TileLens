@@ -7,6 +7,11 @@ unsupported-spill-mapping flag, not an invented zero-traffic prediction.
 
 import math
 
+from triton_viz.performance.gpu_issue_features import (
+    ISSUE_DOT_FEATURES,
+    dot_issue_features,
+)
+
 from triton_viz.tools.gpu_cold_resource_diagnostic import (
     SERVICE_FEATURES,
     service_model,
@@ -22,10 +27,12 @@ from triton_viz.tools.gpu_instruction_transfer_audit import (
     WORK_LABELS,
     decompose_work,
     predict_work,
+    scale as instruction_scale,
 )
 
 REQUESTS = tuple("predicted_wave_" + op for op in OPS)
 INSTRUCTION_WORK = tuple("predicted_wave_instruction_" + op for op in WORK_LABELS)
+ISSUE_SERVICE_FEATURES = SERVICE_FEATURES[:5] + ISSUE_DOT_FEATURES + INSTRUCTION_WORK
 
 
 def request_prediction(training, source, *, separate_single_dot=False):
@@ -82,7 +89,10 @@ def validate(
     include_regime=False,
     instruction_rows=None,
     region_instruction_rows=None,
+    issued_dot=False,
 ):
+    if issued_dot and region_instruction_rows is None:
+        raise ValueError("Issued dot pricing requires region instruction controls")
     shape_groups = {}
     for rows in (
         (counter_rows, latency_rows)
@@ -147,6 +157,8 @@ def validate(
         names += ("source_plus_instruction_work",)
     if region_instruction_rows is not None:
         names += ("source_plus_region_instruction_work",)
+    if issued_dot:
+        names += ("source_plus_region_issued_dot_work",)
     cache = {}
 
     def fold(excluded):
@@ -194,6 +206,21 @@ def validate(
                         / 32
                         * row["pricing_features"]["waves"]
                     )
+            issued_features = (
+                {
+                    **region_features,
+                    **dot_issue_features(
+                        precision=row["source_precision"],
+                        instructions_per_warp=instruction_scale(row),
+                        threads_per_program=row["source_features"][
+                            "threads_per_program"
+                        ],
+                        waves=row["pricing_features"]["waves"],
+                    ),
+                }
+                if issued_dot
+                else {}
+            )
             work = (
                 predict_work(instructions, row)
                 if pure and instructions is not None
@@ -231,6 +258,7 @@ def validate(
                     regime_features=regime_features,
                     instruction_features=instruction_features,
                     region_features=region_features,
+                    issued_features=issued_features,
                     region_ood=region_work["ood_reasons"]
                     if region_work is not None
                     else [],
@@ -270,18 +298,30 @@ def validate(
                 [{**r, "features": r["region_features"]} for r in training],
                 SERVICE_FEATURES + INSTRUCTION_WORK,
             )
+        if issued_dot:
+            models["source_plus_region_issued_dot_work"] = service_model(
+                [{**r, "features": r["issued_features"]} for r in training],
+                ISSUE_SERVICE_FEATURES,
+            )
         predictions = {name: [] for name in names}
         for row in projected:
             if row["group"] not in excluded:
                 continue
             for name in names:
                 fallback = (
-                    name not in {"source", "source_plus_region_instruction_work"}
+                    name
+                    not in {
+                        "source",
+                        "source_plus_region_instruction_work",
+                        "source_plus_region_issued_dot_work",
+                    }
                     and not row["pure"]
                 )
                 predicted = service_prediction(
                     models["source" if fallback else name],
-                    row["region_features"]
+                    row["issued_features"]
+                    if name == "source_plus_region_issued_dot_work"
+                    else row["region_features"]
                     if name == "source_plus_region_instruction_work"
                     else row["instruction_features"]
                     if name == "source_plus_instruction_work"
@@ -289,7 +329,10 @@ def validate(
                     if name == "source_plus_regime_requests"
                     else row["features"],
                 )
-                if name == "source_plus_region_instruction_work":
+                if name in {
+                    "source_plus_region_instruction_work",
+                    "source_plus_region_issued_dot_work",
+                }:
                     predicted["ood_reasons"] += row["region_ood"]
                 elif name == "source_plus_instruction_work":
                     predicted["ood_reasons"] += row["instruction_ood"]
