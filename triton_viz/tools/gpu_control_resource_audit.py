@@ -12,6 +12,68 @@ from pathlib import Path
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
+def blocked_dot_fragments(ttgir):
+    """Expose register-fragment replication in explicit blocked dot layouts.
+
+    Fully materialized operand fragments are NOT peak allocated registers:
+    LLVM/ptxas scheduling can stream, reuse, or spill them. Tensor-core layouts
+    stay unsupported here instead of being approximated by this SIMT mapping.
+    """
+    layouts = {}
+    for alias, body in re.findall(
+        r"^(#[\w]+) = #ttg\.blocked<\{([^\n]+)\}>", ttgir, re.M
+    ):
+        fields = {}
+        for name in ("sizePerThread", "threadsPerWarp", "warpsPerCTA"):
+            match = re.search(name + r" = \[(\d+), (\d+)\]", body)
+            if match:
+                fields[name] = [int(v) for v in match.groups()]
+        if len(fields) == 3 and all(v > 0 for pair in fields.values() for v in pair):
+            layouts[alias] = fields
+    rows = []
+    for line in ttgir.splitlines():
+        if not re.search(r"\btt\.dot\b", line):
+            continue
+        shapes = re.findall(r"tensor<(\d+)x(\d+)x(f32|f16|bf16),", line)
+        output = re.search(r"-> tensor<\d+x\d+xf32, (#[\w]+)>", line)
+        if (
+            len(shapes) != 3
+            or not output
+            or output[1] not in layouts
+            or any(s[2] != "f32" for s in shapes)
+        ):
+            rows.append(
+                dict(
+                    supported=False, reason="non-blocked-FP32 or unsupported dot layout"
+                )
+            )
+            continue
+        (m, k, _), (kb, n, _), (mo, no, _) = shapes
+        m, n, k = int(m), int(n), int(k)
+        if (int(kb), int(mo), int(no)) != (k, m, n):
+            raise ValueError("Inconsistent control dot geometry")
+        layout = layouts[output[1]]
+        sizes = layout["sizePerThread"]
+        coverage = [
+            sizes[i] * layout["threadsPerWarp"][i] * layout["warpsPerCTA"][i]
+            for i in range(2)
+        ]
+        fragments = [
+            sizes[i] * ((shape + coverage[i] - 1) // coverage[i])
+            for i, shape in enumerate((m, n))
+        ]
+        rows.append(
+            dict(
+                supported=True,
+                shape=[m, n, k],
+                layout=layout,
+                accumulator_words_per_thread=fragments[0] * fragments[1],
+                fully_materialized_operand_words_per_thread=k * sum(fragments),
+            )
+        )
+    return rows
+
+
 def sass_backedges(sass):
     """Report direct backward branch regions, excluding terminal self spins.
 
@@ -105,6 +167,9 @@ def audit(root):
                     "local_bytes_per_thread", 4 * row["triton_reported_spills"]
                 ),
                 shared_bytes=row["shared_bytes"],
+                blocked_dot_fragments=blocked_dot_fragments(
+                    row["artifacts"].get("ttgir", "")
+                ),
                 static_ttgir_loop_count=len(
                     re.findall(r"\bscf\.for\b", row["artifacts"].get("ttgir", ""))
                 ),

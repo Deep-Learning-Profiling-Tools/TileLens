@@ -89,3 +89,15 @@ def test_backedge_audit_excludes_terminal_spin_without_inventing_trip_count():
         regions=[dict(start_pc=0, branch_pc=16, static_counts={"HMMA": 1, "BRA": 1})],
     )
     assert not sass_backedges("/*0000*/ FFMA R1;\n/*0000*/ FFMA R1;")["supported"]
+
+
+def test_blocked_dot_operand_replication_is_not_a_spill_prediction():
+    from triton_viz.tools.gpu_control_resource_audit import blocked_dot_fragments
+
+    layout = "#blocked = #ttg.blocked<{sizePerThread = [4, 4], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>"
+    dot = "%r = tt.dot %a, %b, %c : tensor<32x64xf32, #ttg.dot_op<{}>> * tensor<64x64xf32, #ttg.dot_op<{}>> -> tensor<32x64xf32, #blocked>"
+    result = blocked_dot_fragments(layout + "\n" + dot)[0]
+    assert result["accumulator_words_per_thread"] == 16
+    assert result["fully_materialized_operand_words_per_thread"] == 512
+    assert "spill_bytes" not in result
+    assert not blocked_dot_fragments(dot)[0]["supported"]
