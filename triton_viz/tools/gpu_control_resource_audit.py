@@ -29,6 +29,9 @@ def blocked_dot_fragments(ttgir):
             if match:
                 fields[name] = [int(v) for v in match.groups()]
         if len(fields) == 3 and all(v > 0 for pair in fields.values() for v in pair):
+            order = re.search(r"order = \[(\d+), (\d+)\]", body)
+            if order and sorted(int(v) for v in order.groups()) == [0, 1]:
+                fields["order"] = [int(v) for v in order.groups()]
             layouts[alias] = fields
     rows = []
     for line in ttgir.splitlines():

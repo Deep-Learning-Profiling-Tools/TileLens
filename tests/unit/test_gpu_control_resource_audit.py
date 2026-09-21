@@ -98,6 +98,7 @@ def test_blocked_dot_operand_replication_is_not_a_spill_prediction():
     dot = "%r = tt.dot %a, %b, %c : tensor<32x64xf32, #ttg.dot_op<{}>> * tensor<64x64xf32, #ttg.dot_op<{}>> -> tensor<32x64xf32, #blocked>"
     result = blocked_dot_fragments(layout + "\n" + dot)[0]
     assert result["accumulator_words_per_thread"] == 16
+    assert result["layout"]["order"] == [1, 0]
     assert result["fully_materialized_operand_words_per_thread"] == 512
     assert "spill_bytes" not in result
     assert not blocked_dot_fragments(dot)[0]["supported"]
