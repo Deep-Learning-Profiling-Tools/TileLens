@@ -19,7 +19,7 @@ from triton_viz.core.client import Client
 class PerformanceTrace(Client):
     NAME = "performance_trace"
 
-    def __init__(self, *, capture_cache=False):
+    def __init__(self, *, capture_cache=False, capture_loops=False):
         super().__init__()
         self.events: list[dict[str, Any]] = []
         self.grid: tuple[int, ...] = ()
@@ -32,6 +32,11 @@ class PerformanceTrace(Client):
         self.capture_cache = capture_cache
         self._cache_ids: dict[int, int] = {}
         self._cache_accesses: list[dict[str, Any]] = []
+        self.capture_loops = capture_loops
+        self._loop_sites = {}
+        self._loop_kinds = {}
+        self._loop_stacks = {}
+        self._loops = []
 
     def pre_run_callback(self, fn):
         return True
@@ -55,7 +60,54 @@ class PerformanceTrace(Client):
         self.grid_idx = tuple(int(v) for v in grid_idx)
 
     def register_for_loop_callback(self):
-        return ForLoopCallbacks()
+        if not self.capture_loops:
+            return ForLoopCallbacks()
+
+        def range_type(site, kind):
+            self._loop_sites.setdefault(site, len(self._loop_sites))
+            self._loop_kinds[site] = kind
+
+        def before(site, iterable):
+            program = tuple(self.grid_idx or ())
+            stack = self._loop_stacks.setdefault(program, [])
+            row = dict(
+                site=self._loop_sites[site],
+                kind=self._loop_kinds[site],
+                program=list(program),
+                depth=len(stack),
+                event_start=len(self.events),
+                event_end=None,
+                iterations=[],
+                complete=False,
+            )
+            self._loops.append(row)
+            stack.append((site, row))
+
+        def iteration(site, index):
+            stack = self._loop_stacks[tuple(self.grid_idx or ())]
+            if not stack or stack[-1][0] != site:
+                raise ValueError("Incomplete nested loop observation")
+            row = stack[-1][1]
+            if row["iterations"]:
+                row["iterations"][-1]["event_end"] = len(self.events)
+            row["iterations"].append(dict(event_start=len(self.events), event_end=None))
+
+        def after(site):
+            stack = self._loop_stacks[tuple(self.grid_idx or ())]
+            if not stack or stack[-1][0] != site:
+                raise ValueError("Incomplete nested loop observation")
+            _, row = stack.pop()
+            row["event_end"] = len(self.events)
+            row["complete"] = True
+            if row["iterations"]:
+                row["iterations"][-1]["event_end"] = len(self.events)
+
+        return ForLoopCallbacks(
+            range_type_callback=range_type,
+            before_loop_callback=before,
+            loop_iter_listener=iteration,
+            after_loop_callback=after,
+        )
 
     def finalize(self):
         self._keepalive.clear()
@@ -272,7 +324,14 @@ def _bf16_constant_compat():
 
 
 def observe(
-    kernel, grid, *args, num_warps=4, num_stages=2, capture_cache=False, **kwargs
+    kernel,
+    grid,
+    *args,
+    num_warps=4,
+    num_stages=2,
+    capture_cache=False,
+    capture_loops=False,
+    **kwargs,
 ):
     """Interpret a fixed Triton launch on CPU and return portable source facts.
 
@@ -287,7 +346,7 @@ def observe(
         raise ValueError("Observe requires CPU inputs, independent of target execution")
     if hasattr(kernel, "configs"):
         raise ValueError("Resolve autotuning before pre-compile prediction")
-    trace = PerformanceTrace(capture_cache=capture_cache)
+    trace = PerformanceTrace(capture_cache=capture_cache, capture_loops=capture_loops)
     with _bf16_constant_compat():
         triton_viz.trace(trace)(kernel)[grid](
             *args, num_warps=num_warps, num_stages=num_stages, **kwargs
@@ -323,5 +382,11 @@ def observe(
             order="interpreter_program_order_not_hardware_schedule",
             unique_blocks=len(trace._cache_ids),
             accesses=trace._cache_accesses,
+        )
+    if capture_loops:
+        source["loop_trace"] = dict(
+            schema="triton-viz.gpu-source-loops.v1",
+            loops=trace._loops,
+            complete=all(row["complete"] for row in trace._loops),
         )
     return source

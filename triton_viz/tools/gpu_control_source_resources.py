@@ -19,6 +19,7 @@ def main(argv=None):
         "--suite", choices=("pressure", "resource_transfer"), required=True
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--capture-loops", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh source observation root")
@@ -45,6 +46,7 @@ def main(argv=None):
                 *inputs,
                 num_warps=case["num_warps"],
                 num_stages=case["num_stages"],
+                capture_loops=args.capture_loops,
             )
             check_output(case, out)
             features, precision, reasons = source_resource_features(source)
@@ -71,6 +73,16 @@ def main(argv=None):
                     program_count=source["program_count"],
                     numerical_validation="passed",
                     compile_and_cuda_forbidden=True,
+                    **(
+                        {
+                            "loop_trace": source["loop_trace"],
+                            "parent_source_digest": stable_digest(
+                                {k: v for k, v in source.items() if k != "loop_trace"}
+                            ),
+                        }
+                        if args.capture_loops
+                        else {}
+                    ),
                 ),
             )
             print(case["id"], liveness, flush=True)

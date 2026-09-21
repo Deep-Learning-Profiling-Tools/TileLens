@@ -10,6 +10,83 @@ here. Hardware/cache-policy parameters must come from control calibration.
 from __future__ import annotations
 
 import math
+from itertools import product
+
+
+def source_cache_traffic(
+    source, *, capacity_blocks, associativity, schedule, sm_count, method="exact"
+):
+    """Evaluate explicit source scheduling hypotheses, never a hardware trace.
+
+    ``program_serial`` executes programs consecutively. ``sm_wave_interleave``
+    runs one source memory event per program in round-robin waves of SM count.
+    Neither is claimed to bound real miss traffic: residency, issue order and
+    overlap must be validated on controls. Canonical 32-byte source sectors are
+    the model units; this does not assert a physical cache line size.
+    """
+    if schedule not in {"program_serial", "sm_wave_interleave"}:
+        raise ValueError("Unknown source cache scheduling hypothesis")
+    if isinstance(sm_count, bool) or not isinstance(sm_count, int) or sm_count <= 0:
+        raise ValueError("A positive hardware SM count is required")
+    trace = source["cache_access_trace"]
+    if (
+        trace.get("schema") != "triton-viz.gpu-source-cache-access.v1"
+        or trace.get("block_bytes") != 32
+    ):
+        raise ValueError("Unsupported source cache trace")
+    grid = source["grid"]
+    if not grid or any(
+        isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in grid
+    ):
+        raise ValueError("Invalid source launch grid")
+    if source["program_count"] != math.prod(grid):
+        raise ValueError("Source grid/program count mismatch")
+    # Keep zero-memory programs in scheduling waves instead of compressing them
+    # away and accidentally advancing later programs into an earlier wave.
+    by_program = {index: [] for index in product(*(range(n) for n in grid))}
+    seen_blocks = set()
+    previous_seq = -1
+    for event in trace["accesses"]:
+        if event["seq"] <= previous_seq or event["op"] not in {"load", "store"}:
+            raise ValueError("Invalid source cache event order or operation")
+        previous_seq = event["seq"]
+        if any(
+            isinstance(block, bool) or not isinstance(block, int) or block < 0
+            for block in event["blocks"]
+        ):
+            raise ValueError("Invalid canonical source block")
+        if len(set(event["blocks"])) != len(event["blocks"]):
+            raise ValueError("Source event sectors must be unique")
+        seen_blocks.update(event["blocks"])
+        program = tuple(event["program"])
+        if program not in by_program:
+            raise ValueError("Source cache event outside launch grid")
+        by_program[program].append(event)
+    if seen_blocks != set(range(trace["unique_blocks"])):
+        raise ValueError("Incomplete canonical source block domain")
+    programs = list(by_program.values())
+    ordered = []
+    width = 1 if schedule == "program_serial" else sm_count
+    for start in range(0, len(programs), width):
+        wave = programs[start : start + width]
+        for index in range(max(len(events) for events in wave)):
+            for events in wave:
+                if index < len(events):
+                    event = events[index]
+                    ordered.extend((event["op"], block) for block in event["blocks"])
+    return dict(
+        traffic=write_allocating_cache_traffic(
+            ordered,
+            capacity_blocks=capacity_blocks,
+            associativity=associativity,
+            method=method,
+        ),
+        schedule=schedule,
+        sm_count=sm_count,
+        block_bytes=32,
+        policy="write_allocate_uniform_sets_lru_hypothesis",
+        calibrated=False,
+    )
 
 
 def write_allocating_cache_traffic(
