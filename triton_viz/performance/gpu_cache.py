@@ -115,13 +115,16 @@ def write_allocating_cache_traffic(
         for op in ("load", "store")
         for metric in ("requests", "hits", "misses", "cold_misses")
     }
+    probabilities = {None: 0.0}
     for (op, _), distance in zip(accesses, distances):
-        probability = sdcm_hit_probability(
-            distance,
-            capacity_blocks=capacity_blocks,
-            associativity=associativity,
-            method=method,
-        )
+        if distance not in probabilities:
+            probabilities[distance] = sdcm_hit_probability(
+                distance,
+                capacity_blocks=capacity_blocks,
+                associativity=associativity,
+                method=method,
+            )
+        probability = probabilities[distance]
         result[f"{op}_requests"] += 1
         result[f"{op}_hits"] += probability
         result[f"{op}_misses"] += 1 - probability
