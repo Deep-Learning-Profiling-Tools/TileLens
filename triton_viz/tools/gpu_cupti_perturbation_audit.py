@@ -64,6 +64,22 @@ def audit_root(root):
         if audited != row["audit"]:
             raise ValueError("Stored summary differs from raw intervals")
         rows.append(dict(case=case, audit=audited))
+    # Existing measurement-span bound, not a fitted constant or latency CV gate.
+    # Unstable trials remain in every comparison, never silently filtered.
+    stability = []
+    for row in rows:
+        spans = {
+            key: row["audit"][key]["relative_span"]
+            for key in ("body_envelope", "cupti_kernel")
+            if row["audit"][key] is not None
+        }
+        stability.append(
+            dict(
+                case=row["case"],
+                relative_spans=spans,
+                unstable_fields=[key for key, span in spans.items() if span > 0.15],
+            )
+        )
     paired = []
     for programs in (48, 96, 384):
         for iterations in (16, 65536):
@@ -110,6 +126,9 @@ def audit_root(root):
         eligible_for_fit=False,
         count=len(rows),
         paired=paired,
+        stability_limit=0.15,
+        stability=stability,
+        unstable_trial_count=sum(bool(row["unstable_fields"]) for row in stability),
         caveat="All four pairs retained. Instrumented-body perturbation diagnostic only; no latency calibration admission.",
     )
 
@@ -272,7 +291,12 @@ def main(argv=None):
         raise ValueError("Require fresh perturbation audit output")
     result = audit_root(args.root)
     _write(args.output, result)
-    print(result)
+    print(
+        {
+            key: result[key]
+            for key in ("count", "unstable_trial_count", "eligible_for_fit")
+        }
+    )
 
 
 if __name__ == "__main__":

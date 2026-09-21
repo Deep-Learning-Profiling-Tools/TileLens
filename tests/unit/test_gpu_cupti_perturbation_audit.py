@@ -22,7 +22,10 @@ def test_matrix_audit_requires_all_trials_and_checks_raw_hashes(tmp_path, monkey
             )
         )
     )
-    result = dict(body_envelope=dict(median_us=1.0), cupti_kernel=dict(median_us=2.0))
+    result = dict(
+        body_envelope=dict(median_us=1.0, relative_span=0.2),
+        cupti_kernel=dict(median_us=2.0, relative_span=0.1),
+    )
     monkeypatch.setattr(module, "audit_log", lambda *a, **k: result)
     for case in cases:
         (tmp_path / (case["id"] + ".log")).write_text("raw")
@@ -48,6 +51,8 @@ def test_matrix_audit_requires_all_trials_and_checks_raw_hashes(tmp_path, monkey
         )
     audited = module.audit_root(tmp_path)
     assert audited["count"] == 48 and len(audited["paired"]) == 6
+    assert audited["unstable_trial_count"] == 48
+    assert len(audited["stability"]) == 48
     assert all(len(g["pairs"]) == 4 for g in audited["paired"])
     (tmp_path / (cases[-1]["id"] + ".log")).write_text("changed")
     with pytest.raises(ValueError, match="changed trial"):
