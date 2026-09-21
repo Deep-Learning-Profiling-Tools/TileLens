@@ -38,6 +38,15 @@ def test_widths_and_loop_trips_determine_conditional_payload():
     assert not result["eligible_for_fit"]
 
 
+def test_straight_line_unrolled_code_counts_once():
+    r = row(SASS.replace("BRA.U UP0, 0x20", "BRA 0x40"))
+    result = account(r, loop_trips=1)
+    assert result["loop_region"] is None
+    assert result["conditional_bytes_per_thread"] == {"LDL": 12, "STL": 12}
+    with pytest.raises(ValueError, match="executes once"):
+        account(r, loop_trips=5)
+
+
 @pytest.mark.parametrize(
     "sass",
     [

@@ -3,7 +3,24 @@ import json
 
 import pytest
 
-from triton_viz.tools.gpu_dot_lowering_audit import audit
+from triton_viz.tools.gpu_dot_lowering_audit import audit, dot_work_loop_hypothesis
+
+
+def test_late_unroll_trip_hypothesis_uses_dot_work_not_traffic():
+    cfg = dict(supported=True, regions=[dict(static_counts={"HMMA": 80})])
+    result = dot_work_loop_hypothesis(cfg, "HMMA", 112, 272)
+    assert result["supported"] and result["loop_trips"] == 3
+    assert result["outside_instructions"] == 32
+    assert not dot_work_loop_hypothesis(cfg, "HMMA", 112, 273)["supported"]
+    assert not dot_work_loop_hypothesis(cfg, "HMMA", 112, 31)["supported"]
+
+
+def test_fully_unrolled_and_multiple_loop_boundaries():
+    cfg = dict(supported=True, regions=[])
+    assert dot_work_loop_hypothesis(cfg, "HMMA", 80, 80)["supported"]
+    assert not dot_work_loop_hypothesis(cfg, "HMMA", 16, 80)["supported"]
+    cfg["regions"] = [dict(), dict()]
+    assert not dot_work_loop_hypothesis(cfg, "HMMA", 80, 80)["supported"]
 
 
 @pytest.mark.parametrize(

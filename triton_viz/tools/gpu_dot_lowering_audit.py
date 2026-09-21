@@ -13,6 +13,36 @@ from triton_viz.tools.gpu_control_resource_audit import audit as resource_audit
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
+def dot_work_loop_hypothesis(cfg, opcode, static_count, dynamic_work):
+    """Reconcile control source work and SASS, without reading traffic/timing.
+
+    An integer solution is a consistency check, not proof of branch execution:
+    predication and paths still require independent validation.
+    """
+    if not cfg or not cfg.get("supported") or len(cfg["regions"]) > 1:
+        return dict(supported=False, reason="Require at most one direct loop")
+    if not cfg["regions"]:
+        return dict(
+            supported=static_count == dynamic_work,
+            loop_trips=None,
+            outside_instructions=static_count,
+            dynamic_instructions=dynamic_work,
+            reason="Straight-line emitted work must match full source work",
+        )
+    inside = cfg["regions"][0]["static_counts"].get(opcode, 0)
+    outside = static_count - inside
+    remaining = dynamic_work - outside
+    if inside <= 0 or outside < 0 or remaining < inside or remaining % inside:
+        return dict(supported=False, reason="No positive integer dot-work solution")
+    return dict(
+        supported=True,
+        loop_trips=int(remaining / inside),
+        loop_instructions=inside,
+        outside_instructions=outside,
+        dynamic_instructions=dynamic_work,
+    )
+
+
 def audit(resource_root, source_root):
     resources = resource_audit(resource_root)
     manifest = json.loads((source_root / "manifest.json").read_text())
@@ -123,6 +153,12 @@ def audit(resource_root, source_root):
                 emitted_static_ptx_instructions=ptx_actual,
                 ptx_exact_match=expected == ptx_actual,
                 sass_backedges=resource["sass_backedges"],
+                dot_work_loop_hypothesis=dot_work_loop_hypothesis(
+                    resource["sass_backedges"],
+                    opcode,
+                    actual,
+                    expected * operations / body_count,
+                ),
                 local_bytes_per_thread=resource["local_bytes_per_thread"],
             )
         )

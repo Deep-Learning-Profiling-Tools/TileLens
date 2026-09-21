@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,43 @@ METRICS = (
     "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum",
     "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum",
 )
+
+
+def reusable_controls(root, *, hardware, probe_sha256, ncu_version):
+    """Validate completed parent rows; preserve failed rows only in their parent."""
+    from triton_viz.tools.gpu_local_counter_audit import parse
+
+    manifest = json.loads((root / "manifest.json").read_text())
+    if any(
+        manifest.get(k) != v
+        for k, v in {
+            "role": "control",
+            "cases": selected_controls("pressure"),
+            "metrics": list(METRICS),
+            "hardware": hardware,
+            "probe_sha256": probe_sha256,
+            "ncu_version": ncu_version,
+        }.items()
+    ):
+        raise ValueError("Cannot resume a different control protocol or hardware")
+    reused = {}
+    for case in manifest["cases"]:
+        path = root / (case["id"] + ".csv")
+        try:
+            text, log = path.read_text(), path.with_suffix(".log").read_text()
+            parse(text)
+            if (
+                f"control={case['id']} numerical=passed profiler_timing_not_for_fit"
+                not in log
+            ):
+                continue
+        except (OSError, ValueError):
+            continue
+        reused[case["id"]] = dict(
+            csv_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            log_sha256=hashlib.sha256(log.encode()).hexdigest(),
+        )
+    return reused
 
 
 def commands(ncu, output, *, allow_idle_graphics=False):
@@ -53,6 +91,7 @@ def main(argv=None):
     parser.add_argument("--ncu", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
+    parser.add_argument("--resume-from", type=Path)
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require a fresh control output directory")
@@ -67,23 +106,56 @@ def main(argv=None):
     declared = commands(
         args.ncu, args.output, allow_idle_graphics=args.allow_idle_graphics
     )
+    hardware = {k: baseline[k] for k in ("uuid", "driver", "index")}
+    probe_sha256 = hashlib.sha256(
+        Path(__file__).with_name("gpu_control_counter_probe.py").read_bytes()
+    ).hexdigest()
+    reused = (
+        {}
+        if args.resume_from is None
+        else reusable_controls(
+            args.resume_from,
+            hardware=hardware,
+            probe_sha256=probe_sha256,
+            ncu_version=version,
+        )
+    )
     _write(
         args.output / "manifest.json",
         dict(
             role="control",
             cases=selected_controls("pressure"),
             commands=declared,
-            hardware={k: baseline[k] for k in ("uuid", "driver", "index")},
+            hardware=hardware,
             ncu_version=version,
             metrics=list(METRICS),
             eligible_for_latency_fit=False,
-            probe_sha256=hashlib.sha256(
-                Path(__file__).with_name("gpu_control_counter_probe.py").read_bytes()
-            ).hexdigest(),
+            probe_sha256=probe_sha256,
+            inherited_controls=reused,
+            parent=None
+            if args.resume_from is None
+            else dict(
+                root=str(args.resume_from.resolve()),
+                manifest_sha256=hashlib.sha256(
+                    (args.resume_from / "manifest.json").read_bytes()
+                ).hexdigest(),
+            ),
         ),
     )
     for command in declared:
         path = Path(command[command.index("--log-file") + 1])
+        if path.stem in reused:
+            for suffix in (".csv", ".log"):
+                original = args.resume_from / (path.stem + suffix)
+                content = original.read_bytes()
+                if (
+                    hashlib.sha256(content).hexdigest()
+                    != reused[path.stem][suffix[1:] + "_sha256"]
+                ):
+                    raise ValueError("Parent control changed during resume")
+                path.with_suffix(suffix).write_bytes(content)
+            print(path.stem, "inherited unchanged from verified parent", flush=True)
+            continue
         with path.with_suffix(".log").open("w") as log:
             try:
                 completed = subprocess.run(

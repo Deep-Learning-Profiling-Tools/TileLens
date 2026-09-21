@@ -28,9 +28,11 @@ def account(row, *, loop_trips):
     if hashlib.sha256(sass.encode()).hexdigest() != row["artifact_sha256"]["sass"]:
         raise ValueError("SASS fingerprint mismatch")
     cfg = sass_backedges(sass)
-    if not cfg["supported"] or len(cfg["regions"]) != 1:
-        raise ValueError("Require exactly one direct loop region")
-    region = cfg["regions"][0]
+    if not cfg["supported"] or len(cfg["regions"]) > 1:
+        raise ValueError("Require at most one direct loop region")
+    region = cfg["regions"][0] if cfg["regions"] else None
+    if region is None and loop_trips != 1:
+        raise ValueError("Straight-line SASS executes once, not source repeat times")
     totals = {scope: {op: 0 for op in ("LDL", "STL")} for scope in ("loop", "outside")}
     for line in sass.splitlines():
         match = re.search(
@@ -47,7 +49,10 @@ def account(row, *, loop_trips):
             raise ValueError("Unsupported indirect or interprocedural control flow")
         if base == "BRA":
             target = re.search(r"\b0x([0-9a-fA-F]+)\b", operands)
-            if not target or (pc != region["branch_pc"] and int(target[1], 16) != pc):
+            if not target or (
+                (region is None or pc != region["branch_pc"])
+                and int(target[1], 16) != pc
+            ):
                 raise ValueError("Additional branch requires path-sensitive accounting")
         if base not in {"LDL", "STL"}:
             continue
@@ -57,7 +62,11 @@ def account(row, *, loop_trips):
         if set(suffixes) - {"LU", "64", "128"} or {"64", "128"} <= set(suffixes):
             raise ValueError("Unsupported local-memory width/modifier")
         width = 16 if "128" in suffixes else 8 if "64" in suffixes else 4
-        scope = "loop" if region["start_pc"] <= pc <= region["branch_pc"] else "outside"
+        scope = (
+            "loop"
+            if region is not None and region["start_pc"] <= pc <= region["branch_pc"]
+            else "outside"
+        )
         totals[scope][base] += width
     case = row["case"]
     programs, warps = case["programs"], case["num_warps"]

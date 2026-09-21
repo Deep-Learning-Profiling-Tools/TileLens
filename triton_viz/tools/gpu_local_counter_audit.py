@@ -38,7 +38,7 @@ def parse(text):
     return dict(zip(("LDL", "STL"), (values[m] for m in METRICS)))
 
 
-def audit(counter_root, resource_root):
+def audit(counter_root, resource_root, source_root=None):
     cases = selected_controls("pressure")
     manifests = [
         json.loads((p / "manifest.json").read_text())
@@ -51,6 +51,15 @@ def audit(counter_root, resource_root):
         "hardware", {}
     ).get("uuid"):
         raise ValueError("Missing counter protocol identity")
+    hypotheses = None
+    if source_root is not None:
+        from triton_viz.tools.gpu_dot_lowering_audit import audit as dot_audit
+
+        hypotheses = {
+            r["case"]["id"]: r["dot_work_loop_hypothesis"]
+            for r in dot_audit(resource_root, source_root)["rows"]
+            if r["applicable"]
+        }
     rows = []
     for case in cases:
         row = dict(case=case)
@@ -75,7 +84,14 @@ def audit(counter_root, resource_root):
             )
             if compiled.get("case") != case:
                 raise ValueError("Compiler control identity mismatch")
-            row["conditional_accounting"] = account(compiled, loop_trips=case["repeat"])
+            trips = case["repeat"]
+            if hypotheses is not None:
+                hypothesis = hypotheses[case["id"]]
+                row["dot_work_loop_hypothesis"] = hypothesis
+                if not hypothesis["supported"]:
+                    raise ValueError("Source/SASS dot-work hypothesis unsupported")
+                trips = hypothesis["loop_trips"] or 1
+            row["conditional_accounting"] = account(compiled, loop_trips=trips)
             if row["counter_status"] == "complete":
                 row["conditional_exact_match"] = (
                     row["counters"]
@@ -96,7 +112,10 @@ def audit(counter_root, resource_root):
             r.get("conditional_exact_match", False) for r in rows
         ),
         eligible_for_fit=False,
-        caveat="All controls retained. Source repeat used as explicit SASS-trip hypothesis; late unrolling can invalidate it. Counter agreement is a diagnostic, not a source mapping CV gate or latency release.",
+        trip_hypothesis="source_dot_work_reconciled_with_control_sass"
+        if hypotheses is not None
+        else "declared_source_repeat",
+        caveat="All controls retained. Trip hypotheses do not read counters. Dot-work consistency does not prove branch execution or active lanes. Counter agreement is a diagnostic, not a source mapping CV gate or latency release.",
     )
 
 
@@ -104,11 +123,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--counter-root", type=Path, required=True)
     parser.add_argument("--resource-root", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh audit output")
-    result = audit(args.counter_root, args.resource_root)
+    result = audit(args.counter_root, args.resource_root, args.source_root)
     _write(args.output, result)
     print(
         {

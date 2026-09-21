@@ -59,3 +59,54 @@ def test_missing_controls_retained_and_holdout_manifest_rejected(tmp_path):
     (resources / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="control manifests"):
         audit(counters, resources)
+
+
+def test_counter_labels_cannot_change_dot_work_trip_hypothesis(tmp_path, monkeypatch):
+    from triton_viz.tools import gpu_dot_lowering_audit, gpu_local_counter_audit
+
+    counters, resources = tmp_path / "counters", tmp_path / "resources"
+    counters.mkdir()
+    (resources / "controls").mkdir(parents=True)
+    cases = selected_controls("pressure")
+    manifest = dict(
+        role="control", cases=cases, hardware=dict(uuid="gpu"), metrics=list(METRICS)
+    )
+    for root in (counters, resources):
+        (root / "manifest.json").write_text(json.dumps(manifest))
+    case = cases[0]
+    (resources / "controls" / (case["id"] + ".json")).write_text(
+        json.dumps(dict(case=case))
+    )
+    path = counters / (case["id"] + ".csv")
+    path.with_suffix(".log").write_text(
+        f"control={case['id']} numerical=passed profiler_timing_not_for_fit"
+    )
+    monkeypatch.setattr(
+        gpu_dot_lowering_audit,
+        "audit",
+        lambda *_: dict(
+            rows=[
+                dict(
+                    case=c,
+                    applicable=True,
+                    dot_work_loop_hypothesis=dict(supported=True, loop_trips=3),
+                )
+                for c in cases
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        gpu_local_counter_audit,
+        "account",
+        lambda _, loop_trips: dict(
+            assumed_loop_trips=loop_trips,
+            conditional_payload_sector_equivalents=dict(LDL=0, STL=0),
+        ),
+    )
+    predictions = []
+    for values in ((0, 0), (999, 999)):
+        path.write_text(table(values))
+        result = audit(counters, resources, tmp_path / "source")
+        predictions.append(result["rows"][0]["conditional_accounting"])
+    assert predictions[0] == predictions[1]
+    assert predictions[0]["assumed_loop_trips"] == 3

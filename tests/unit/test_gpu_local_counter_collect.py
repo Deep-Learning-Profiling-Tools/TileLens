@@ -1,5 +1,13 @@
+import json
+
+import pytest
+
 from triton_viz.tools.gpu_control_resources import selected_controls
-from triton_viz.tools.gpu_local_counter_collect import METRICS, commands
+from triton_viz.tools.gpu_local_counter_collect import (
+    METRICS,
+    commands,
+    reusable_controls,
+)
 
 
 def test_collects_all_declared_controls_without_timing_or_clock_changes(tmp_path):
@@ -23,3 +31,34 @@ def test_collects_all_declared_controls_without_timing_or_clock_changes(tmp_path
         "--allow-idle-graphics" in c
         for c in commands("ncu", tmp_path, allow_idle_graphics=True)
     )
+
+
+def test_resume_reuses_only_complete_matching_control_rows(tmp_path):
+    cases = selected_controls("pressure")
+    hardware = dict(uuid="gpu", driver="driver", index=0)
+    manifest = dict(
+        role="control",
+        cases=cases,
+        metrics=list(METRICS),
+        hardware=hardware,
+        probe_sha256="probe",
+        ncu_version="ncu",
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    case = cases[0]
+    path = tmp_path / (case["id"] + ".csv")
+    path.write_text(
+        "\n".join(
+            ['"ID","Kernel Name","Metric Name","Metric Value"']
+            + [f'"0","geometry_dot","{m}","0"' for m in METRICS]
+        )
+    )
+    path.with_suffix(".log").write_text(
+        f"control={case['id']} numerical=passed profiler_timing_not_for_fit"
+    )
+    kwargs = dict(hardware=hardware, probe_sha256="probe", ncu_version="ncu")
+    assert set(reusable_controls(tmp_path, **kwargs)) == {case["id"]}
+    path.with_suffix(".log").write_text("BusyGPU: foreign process")
+    assert not reusable_controls(tmp_path, **kwargs)
+    with pytest.raises(ValueError, match="different control"):
+        reusable_controls(tmp_path, **{**kwargs, "probe_sha256": "changed"})
