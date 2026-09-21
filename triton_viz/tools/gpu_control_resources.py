@@ -19,9 +19,9 @@ from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
 def selected_controls(suite):
-    if suite not in {"geometry", "structure", "pressure"}:
+    if suite not in {"geometry", "structure", "pressure", "resource_transfer"}:
         raise ValueError(
-            "Only declared geometry/structure/pressure controls are supported"
+            "Only declared geometry/structure/pressure/resource_transfer controls are supported"
         )
     cases = load_cases(suite, "control")
     if len({case["id"] for case in cases}) != len(cases):
@@ -32,7 +32,9 @@ def selected_controls(suite):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--suite", choices=("geometry", "structure", "pressure"), required=True
+        "--suite",
+        choices=("geometry", "structure", "pressure", "resource_transfer"),
+        required=True,
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")

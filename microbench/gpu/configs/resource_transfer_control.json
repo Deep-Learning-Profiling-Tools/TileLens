@@ -1,0 +1,12 @@
+{
+  "schema": "triton-viz.gpu-resource-transfer-controls.v1",
+  "role": "control",
+  "programs": 48,
+  "precisions": [["float32", "ieee"], ["float32", "tf32"], ["bfloat16", "ieee"], ["float16", "ieee"]],
+  "warps": [4, 8],
+  "stages": [1, 2],
+  "dot_tiles": [[128, 64, 32], [128, 256, 32]],
+  "dot_repeats": [1, 5, 17],
+  "composition_tiles": [[32, 64, 32], [64, 64, 32]],
+  "composition_modes": [0, 1, 2]
+}

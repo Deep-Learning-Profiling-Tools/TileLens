@@ -17,10 +17,56 @@ def load_cases(suite, role):
         "structure",
         "stability",
         "pressure",
+        "resource_transfer",
     }:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "resource_transfer":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "resource_transfer_control.json").read_text())
+        if (data["schema"], data["role"]) != (
+            "triton-viz.gpu-resource-transfer-controls.v1",
+            "control",
+        ):
+            raise ValueError("Invalid resource transfer declaration")
+        result = []
+        for family in ("dot", "composition"):
+            variants = (
+                data["dot_repeats"] if family == "dot" else data["composition_modes"]
+            )
+            for (dtype, precision), warps, stages, (bm, bn, bk), variant in product(
+                data["precisions"],
+                data["warps"],
+                data["stages"],
+                data[f"{family}_tiles"],
+                variants,
+            ):
+                result.append(
+                    dict(
+                        id=f"resource_{family}_{dtype}_{precision}_{bm}x{bn}x{bk}_w{warps}_s{stages}_{variant}",
+                        kind="geometry_dot"
+                        if family == "dot"
+                        else "structure_composition",
+                        programs=data["programs"],
+                        dtype=dtype,
+                        precision=precision,
+                        bm=bm,
+                        bn=bn,
+                        bk=bk,
+                        num_warps=warps,
+                        num_stages=stages,
+                        repeat=variant if family == "dot" else 1,
+                        **(
+                            {"reuse": "none"}
+                            if family == "dot"
+                            else {"variant": variant}
+                        ),
+                        cv_group=f"resource_{family}_{bm}x{bn}x{bk}",
+                    )
+                )
+        return result
     if suite == "pressure":
         if role == "holdout":
             return []

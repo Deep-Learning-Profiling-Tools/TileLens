@@ -1,6 +1,9 @@
 import pytest
 
-from triton_viz.performance.gpu_resources import source_resource_features
+from triton_viz.performance.gpu_resources import (
+    source_resource_features,
+    source_liveness_features,
+)
 
 
 def source(*, m=256, n=128, k=32, warps=4, dtype="fp16"):
@@ -47,3 +50,27 @@ def test_unknown_resource_precision_is_explicit_not_guessed():
 def test_invalid_resource_launch_fails(warps):
     with pytest.raises(ValueError):
         source_resource_features(source(warps=warps))
+
+
+def test_source_liveness_releases_at_last_consumer_and_program_boundary():
+    events = [
+        dict(seq=i, dependencies=deps, program=[program], dtype="fp32", elements=128)
+        for i, deps, program in [(0, [], 0), (1, [0], 0), (2, [0, 1], 0), (3, [], 1)]
+    ]
+    trace = dict(num_warps=4, events=events)
+    assert source_liveness_features(trace)["logical_live_float_words_per_thread"] == 3
+    events[2]["dependencies"] = [1]
+    assert source_liveness_features(trace)["logical_live_float_words_per_thread"] == 2
+
+
+@pytest.mark.parametrize("dep", [1, 7])
+def test_source_liveness_rejects_future_or_cross_program_dependency(dep):
+    events = [
+        dict(seq=0, dependencies=[], program=[0], dtype="fp32", elements=128),
+        dict(seq=1, dependencies=[dep], program=[1], dtype="fp32", elements=128),
+    ]
+    with pytest.raises(ValueError):
+        source_liveness_features(dict(num_warps=4, events=events))
+    events[1]["dependencies"] = [0]
+    with pytest.raises(ValueError, match="cross-program"):
+        source_liveness_features(dict(num_warps=4, events=events))

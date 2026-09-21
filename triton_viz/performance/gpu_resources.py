@@ -10,6 +10,47 @@ from __future__ import annotations
 import math
 
 
+def source_liveness_features(source):
+    """Measure logical SSA output lifetimes in the observed program order.
+
+    This counts tensor values, including view-like outputs, not allocated
+    registers. Compiler fusion, aliasing, rematerialization and pipelining can
+    all change physical demand. No compiled artifact is consulted.
+    """
+    warps = source["num_warps"]
+    if isinstance(warps, bool) or not isinstance(warps, int) or warps <= 0:
+        raise ValueError("A positive source warp count is required")
+    events = source["events"]
+    by_seq = {}
+    last_use = {}
+    previous_seq = None
+    for event in events:
+        seq = event["seq"]
+        if previous_seq is not None and seq <= previous_seq:
+            raise ValueError("Source events must have unique increasing sequence IDs")
+        previous_seq = seq
+        for dep in event["dependencies"]:
+            if dep not in by_seq or by_seq[dep]["program"] != event["program"]:
+                raise ValueError("Invalid or cross-program source dependency")
+            last_use[dep] = seq
+        by_seq[seq] = event
+        last_use[seq] = seq
+    widths = {"fp32": 4, "fp16": 2, "bf16": 2}
+    releases = {}
+    live = peak = 0.0
+    for event in events:
+        words = event["elements"] * widths.get(event["dtype"], 0) / 4
+        if not math.isfinite(words) or words < 0:
+            raise ValueError("Invalid logical tensor size")
+        live += words
+        # Output and its last-used inputs overlap at the operation boundary.
+        peak = max(peak, live)
+        end = last_use[event["seq"]]
+        releases[end] = releases.get(end, 0) + words
+        live -= releases.pop(event["seq"], 0)
+    return {"logical_live_float_words_per_thread": peak / (32 * warps)}
+
+
 def source_resource_features(source):
     warps = source["num_warps"]
     stages = source["num_stages"]
