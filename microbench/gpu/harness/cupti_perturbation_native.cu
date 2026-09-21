@@ -18,6 +18,9 @@
 #ifndef TV_LOCAL_SLOTS
 #define TV_LOCAL_SLOTS 128
 #endif
+#ifndef TV_RECORD_SM_ID
+#define TV_RECORD_SM_ID 0
+#endif
 #if TV_LOCAL_SLOTS != 32 && TV_LOCAL_SLOTS != 64 && TV_LOCAL_SLOTS != 128 && TV_LOCAL_SLOTS != 256
 #error Unsupported declared local slot count
 #endif
@@ -36,7 +39,12 @@ struct Timestamp {
   uint32_t device, context, stream, correlation;
   char name[256];
 };
-struct BodyInterval { uint64_t start, end; };
+struct BodyInterval {
+  uint64_t start, end;
+#if TV_RECORD_SM_ID
+  uint32_t start_sm, end_sm, sm_id_count;
+#endif
+};
 static void check(cudaError_t status) {
   if (status != cudaSuccess) {
     std::fprintf(stderr, "cuda_error=%s\n", cudaGetErrorString(status));
@@ -50,6 +58,13 @@ __global__ void perturbation_eviction(uint32_t *buffer, size_t words) {
 __global__ void perturbation_body(float *output, BodyInterval *intervals,
                                   int iterations) {
   uint64_t start = 0, end = 0;
+#if TV_RECORD_SM_ID
+  uint32_t start_sm = 0, end_sm = 0, sm_id_count = 0;
+  if (threadIdx.x == 0) {
+    asm volatile("mov.u32 %0, %%smid;" : "=r"(start_sm) :: "memory");
+    asm volatile("mov.u32 %0, %%nsmid;" : "=r"(sm_id_count));
+  }
+#endif
   if (threadIdx.x == 0) asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(start) :: "memory");
   __syncthreads();
   float value = 1.0f + threadIdx.x;
@@ -82,13 +97,21 @@ __global__ void perturbation_body(float *output, BodyInterval *intervals,
   __syncthreads();
   if (threadIdx.x == 0) {
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(end) :: "memory");
+#if TV_RECORD_SM_ID
+    asm volatile("mov.u32 %0, %%smid;" : "=r"(end_sm) :: "memory");
+    intervals[blockIdx.x] = {start, end, start_sm, end_sm, sm_id_count};
+#else
     intervals[blockIdx.x] = {start, end};
+#endif
   }
 }
 int main(int argc, char **argv) {
   // MODE LIBRARY PROGRAMS ITERATIONS [counter_only]. Timing uses 11 x 32 launches.
   if (argc != 5 && argc != 6) return 2;
   const bool counter_only = argc == 6 && std::strcmp(argv[5], "counter_only") == 0;
+#if TV_RECORD_SM_ID
+  if (!counter_only) return 2;
+#endif
   if (argc == 6 && (!counter_only || std::strcmp(argv[1], "none") != 0)) return 2;
   const int samples = counter_only ? 1 : 352;
   const bool enabled = std::strcmp(argv[1], "software_serial") == 0;
@@ -125,6 +148,9 @@ int main(int argc, char **argv) {
   std::printf("local_slots=%d\n", TV_LOCAL_SLOTS);
 #endif
   if (counter_only) std::printf("purpose=counter_only,measurement_samples=1\n");
+#if TV_RECORD_SM_ID
+  std::printf("sm_observation=endpoint_v1\n");
+#endif
   auto drain = [&](int sample) {
     if (!enabled) return true;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -197,6 +223,10 @@ int main(int argc, char **argv) {
       std::printf("body,%d,%d,%llu,%llu\n", sample, block,
                   (unsigned long long)r.start, (unsigned long long)r.end);
       valid &= r.start > 0 && r.end > r.start;
+#if TV_RECORD_SM_ID
+      std::printf("cta_sm,%d,%d,%u,%u,%u\n", sample, block, r.start_sm, r.end_sm, r.sm_id_count);
+      valid &= r.sm_id_count > 0 && r.start_sm < r.sm_id_count && r.end_sm < r.sm_id_count;
+#endif
     }
   std::vector<float> values(programs * 128), reference(128);
   check(cudaMemcpy(values.data(), output, values.size() * sizeof(float), cudaMemcpyDeviceToHost));

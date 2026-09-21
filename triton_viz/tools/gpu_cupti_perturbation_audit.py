@@ -160,6 +160,7 @@ def audit_log(
         raise ValueError("Unknown declared perturbation control")
     metadata = {}
     pending, records, deliveries, bodies = [], [], [], []
+    sm_observations = []
     for line in text.splitlines():
         parts = line.split(",")
         if parts[0] == "cupti":
@@ -195,6 +196,18 @@ def audit_log(
             deliveries.append(sample)
             records.extend(pending)
             pending = []
+        elif parts[0] == "cta_sm":
+            if len(parts) != 6:
+                raise ValueError("Malformed SM observation")
+            sample, block, first, last, count = map(int, parts[1:])
+            if (
+                (sample, block) != divmod(len(sm_observations), programs)
+                or count <= 0
+                or not 0 <= first < count
+                or not 0 <= last < count
+            ):
+                raise ValueError("Invalid or reordered SM observation")
+            sm_observations.append(dict(start_sm=first, end_sm=last, sm_id_count=count))
         elif parts[0] == "body":
             if len(parts) != 5:
                 raise ValueError("Malformed CTA interval")
@@ -235,6 +248,8 @@ def audit_log(
         expected["local_slots"] = str(local_slots)
     if counter_only:
         expected.update(purpose="counter_only", measurement_samples="1")
+    if "sm_observation" in metadata:
+        expected["sm_observation"] = "endpoint_v1"
     if any(metadata.get(k) != v for k, v in expected.items()):
         raise ValueError("Unverified identity, numerical result or completion")
     allowed = set(expected) | {
@@ -258,6 +273,14 @@ def audit_log(
         raise ValueError("Invalid hardware or warmup/sweep provenance")
     if pending or len(bodies) != samples * programs:
         raise ValueError("Incomplete measurement matrix")
+    if "sm_observation" in metadata:
+        if (
+            len(sm_observations) != len(bodies)
+            or len({r["sm_id_count"] for r in sm_observations}) != 1
+        ):
+            raise ValueError("Incomplete or inconsistent SM observations")
+    elif sm_observations:
+        raise ValueError("Undeclared SM observations")
     cupti = []
     if mode == "software_serial":
         if deliveries != [-1] * warmups + list(range(352)):
@@ -291,6 +314,7 @@ def audit_log(
             eligible_for_fit=False,
             metadata=metadata,
             instrumented_body_envelope_us=envelopes[0],
+            **(dict(sm_observations=sm_observations) if sm_observations else {}),
             caveat="Single profiler replay control; no timing stability estimate or latency admission.",
         )
 

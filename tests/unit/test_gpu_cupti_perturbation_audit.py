@@ -37,6 +37,20 @@ def test_counter_only_is_not_a_stable_timing_measurement(slots):
             audit_log(bad, **kwargs)
     with pytest.raises(ValueError):
         audit_log(raw, **dict(kwargs, counter_only=False))
+    observed = (
+        raw
+        + "\nsm_observation=endpoint_v1\n"
+        + "\n".join(f"cta_sm,0,{b},{2*(b%48)},{2*(b%48)},96" for b in range(192))
+    )
+    # Physical SM count does not bound sparse SM identifiers.
+    assert len(audit_log(observed, **kwargs)["sm_observations"]) == 192
+    for bad in (
+        observed.replace("cta_sm,0,191", "cta_sm,0,192"),
+        observed.replace(",94,94,96", ",96,96,96"),
+        observed.replace("sm_observation=endpoint_v1\n", ""),
+    ):
+        with pytest.raises(ValueError):
+            audit_log(bad, **kwargs)
 
 
 def test_matrix_audit_requires_all_trials_and_checks_raw_hashes(tmp_path, monkeypatch):
