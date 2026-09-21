@@ -1,8 +1,115 @@
 """Validate complete native perturbation logs; never admit latency fit data."""
 
 import statistics
+import argparse
+import hashlib
+import json
+from pathlib import Path
 
 from microbench.gpu.harness.cupti import validate_timestamps
+
+
+def audit_root(root):
+    from triton_viz.tools.gpu_cupti_perturbation_collect import declared_trials
+
+    manifest = json.loads((root / "manifest.json").read_text())
+    cases = declared_trials()
+    if (
+        manifest.get("role") != "control"
+        or manifest.get("eligible_for_fit") is not False
+        or manifest["trials"] != cases
+    ):
+        raise ValueError("Require the full declared control-only matrix")
+    rows = []
+    for case in cases:
+        row = json.loads((root / (case["id"] + ".json")).read_text())
+        raw = (root / (case["id"] + ".log")).read_bytes()
+        if (
+            row.get("role") != "control"
+            or row.get("eligible_for_fit") is not False
+            or row["case"] != case
+            or row.get("status") != "complete"
+            or row["log_sha256"] != hashlib.sha256(raw).hexdigest()
+        ):
+            raise ValueError("Incomplete, relabeled or changed trial")
+        monitor = row["monitoring"]
+        if (
+            monitor["contaminated"]
+            or monitor["rejection_reasons"]
+            or monitor["returncode"] != 0
+            or len(monitor["samples"]) < 2
+        ):
+            raise ValueError("Rejected or incomplete monitoring")
+        for sample in monitor["samples"]:
+            if (
+                any(
+                    sample[k] != manifest["baseline"][k]
+                    for k in ("uuid", "driver", "index")
+                )
+                or any(p["pid"] != monitor["child_pid"] for p in sample["processes"])
+                or any(
+                    p["pid"] not in manifest["allowed_graphics"]
+                    for p in sample["graphics_processes"]
+                )
+            ):
+                raise ValueError("Monitoring identity mismatch or foreign process")
+        audited = audit_log(
+            raw.decode(),
+            mode=case["mode"],
+            programs=case["programs"],
+            iterations=case["iterations"],
+        )
+        if audited != row["audit"]:
+            raise ValueError("Stored summary differs from raw intervals")
+        rows.append(dict(case=case, audit=audited))
+    paired = []
+    for programs in (48, 96, 384):
+        for iterations in (16, 65536):
+            pairs = []
+            for trial in range(4):
+                modes = {
+                    r["case"]["mode"]: r["audit"]
+                    for r in rows
+                    if (
+                        r["case"]["programs"],
+                        r["case"]["iterations"],
+                        r["case"]["trial"],
+                    )
+                    == (programs, iterations, trial)
+                }
+                off, on = modes["none"], modes["software_serial"]
+                body_off, body_on = (
+                    off["body_envelope"]["median_us"],
+                    on["body_envelope"]["median_us"],
+                )
+                cupti = on["cupti_kernel"]["median_us"]
+                pairs.append(
+                    dict(
+                        trial=trial,
+                        body_off_us=body_off,
+                        body_on_us=body_on,
+                        cupti_us=cupti,
+                        body_change_pct=100 * (body_on / body_off - 1),
+                        cupti_minus_body_on_us=cupti - body_on,
+                    )
+                )
+            paired.append(
+                dict(
+                    programs=programs,
+                    iterations=iterations,
+                    pairs=pairs,
+                    median_body_change_pct=statistics.median(
+                        p["body_change_pct"] for p in pairs
+                    ),
+                )
+            )
+    return dict(
+        role="control",
+        eligible_for_fit=False,
+        count=len(rows),
+        paired=paired,
+        caveat="All four pairs retained. Instrumented-body perturbation diagnostic only; no latency calibration admission.",
+    )
 
 
 def audit_log(text, *, mode, programs, iterations):
@@ -146,3 +253,21 @@ def audit_log(text, *, mode, programs, iterations):
         cupti_minus_body_us=[a - b for a, b in zip(cupti, envelopes)],
         caveat="Instrumented body envelopes omit kernel prelude/epilogue; no timing admission or uninstrumented ground truth.",
     )
+
+
+def main(argv=None):
+    from triton_viz.tools.gpu_cost_model_pipeline import _write
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    if args.output.exists():
+        raise ValueError("Require fresh perturbation audit output")
+    result = audit_root(args.root)
+    _write(args.output, result)
+    print(result)
+
+
+if __name__ == "__main__":
+    main()

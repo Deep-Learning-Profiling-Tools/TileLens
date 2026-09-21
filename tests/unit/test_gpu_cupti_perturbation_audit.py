@@ -1,6 +1,57 @@
 import pytest
+import json
+import hashlib
 
 from triton_viz.tools.gpu_cupti_perturbation_audit import audit_log
+
+
+def test_matrix_audit_requires_all_trials_and_checks_raw_hashes(tmp_path, monkeypatch):
+    from triton_viz.tools import gpu_cupti_perturbation_audit as module
+    from triton_viz.tools.gpu_cupti_perturbation_collect import declared_trials
+
+    cases = declared_trials()
+    baseline = dict(uuid="GPU-test", driver="test", index=0)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            dict(
+                role="control",
+                eligible_for_fit=False,
+                trials=cases,
+                baseline=baseline,
+                allowed_graphics=[],
+            )
+        )
+    )
+    result = dict(body_envelope=dict(median_us=1.0), cupti_kernel=dict(median_us=2.0))
+    monkeypatch.setattr(module, "audit_log", lambda *a, **k: result)
+    for case in cases:
+        (tmp_path / (case["id"] + ".log")).write_text("raw")
+        (tmp_path / (case["id"] + ".json")).write_text(
+            json.dumps(
+                dict(
+                    role="control",
+                    eligible_for_fit=False,
+                    case=case,
+                    status="complete",
+                    log_sha256=hashlib.sha256(b"raw").hexdigest(),
+                    audit=result,
+                    monitoring=dict(
+                        contaminated=False,
+                        rejection_reasons=[],
+                        returncode=0,
+                        child_pid=123,
+                        samples=[dict(**baseline, processes=[], graphics_processes=[])]
+                        * 2,
+                    ),
+                )
+            )
+        )
+    audited = module.audit_root(tmp_path)
+    assert audited["count"] == 48 and len(audited["paired"]) == 6
+    assert all(len(g["pairs"]) == 4 for g in audited["paired"])
+    (tmp_path / (cases[-1]["id"] + ".log")).write_text("changed")
+    with pytest.raises(ValueError, match="changed trial"):
+        module.audit_root(tmp_path)
 
 
 def log(mode="software_serial"):
