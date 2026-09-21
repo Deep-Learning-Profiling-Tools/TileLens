@@ -2,7 +2,11 @@ import copy
 
 import pytest
 
-from triton_viz.tools.gpu_cold_resource_diagnostic import FEATURES, validate
+from triton_viz.tools.gpu_cold_resource_diagnostic import (
+    FEATURES,
+    SERVICE_FEATURES,
+    validate,
+)
 
 
 def fixture():
@@ -26,9 +30,16 @@ def fixture():
     return resources, latencies
 
 
-def test_both_levels_exclude_validation_resources_and_latency_labels():
+@pytest.mark.parametrize("pricing", ["nearest", "service"])
+def test_both_levels_exclude_validation_resources_and_latency_labels(pricing):
     resources, latencies = fixture()
-    first = validate(resources, latencies)
+    for row in latencies:
+        row["pricing_features"] = {
+            **dict.fromkeys(SERVICE_FEATURES, 0),
+            "launch": 1,
+            "waves": 1,
+        }
+    first = validate(resources, latencies, pricing=pricing)
     mutated_resources, mutated_latencies = copy.deepcopy((resources, latencies))
     for row in mutated_resources:
         if row["case"]["cv_group"] == "0":
@@ -37,16 +48,16 @@ def test_both_levels_exclude_validation_resources_and_latency_labels():
     for row in mutated_latencies:
         if row["case"]["cv_group"] == "0":
             row["latency_us"] = 99999
-    second = validate(mutated_resources, mutated_latencies)
+    second = validate(mutated_resources, mutated_latencies, pricing=pricing)
     assert first["folds"][0] == second["folds"][0]
     for name in first["ordinary"]:
         a = [
-            (r["id"], r["prediction_us"], r["neighbors"])
+            (r["id"], r["prediction_us"], r.get("neighbors"))
             for r in first["ordinary"][name]["rows"]
             if r["group"] == "0"
         ]
         b = [
-            (r["id"], r["prediction_us"], r["neighbors"])
+            (r["id"], r["prediction_us"], r.get("neighbors"))
             for r in second["ordinary"][name]["rows"]
             if r["group"] == "0"
         ]
@@ -78,3 +89,16 @@ def test_partition_or_source_drift_cannot_leak_compiler_labels():
     latencies[0]["case"]["cv_group"] = "another_group"
     with pytest.raises(ValueError, match="partitions"):
         validate(resources, latencies)
+
+
+def test_allocation_demand_has_explicit_units_and_no_fitted_constant():
+    from triton_viz.tools.gpu_cold_resource_diagnostic import allocation_dot_demand
+
+    source = dict(threads_per_program=128, dots_per_program=5)
+    assert allocation_dot_demand(source, 2, 64) == 81920
+    assert allocation_dot_demand(source, 2, 0) == 0
+    for invalid in (-1, float("nan"), True):
+        with pytest.raises(ValueError):
+            allocation_dot_demand(source, 2, invalid)
+    with pytest.raises(ValueError):
+        allocation_dot_demand(source, 0, 64)
