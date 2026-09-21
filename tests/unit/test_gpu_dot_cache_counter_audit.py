@@ -2,8 +2,38 @@ from pathlib import Path
 
 import pytest
 
-from triton_viz.tools.gpu_dot_cache_counter_audit import parse
-from triton_viz.tools.gpu_local_counter_collect import CACHE_METRICS, commands
+from triton_viz.tools.gpu_dot_cache_counter_audit import parse, parse_issue
+from triton_viz.tools.gpu_local_counter_collect import (
+    CACHE_METRICS,
+    ISSUE_METRICS,
+    commands,
+)
+
+
+def test_instruction_phase_has_typed_counters_not_profile_timing():
+    text = "\n".join(
+        ['"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"']
+        + [
+            f'"0","geometry_dot","{name}","{unit}","{value}"'
+            for name, unit, value in zip(
+                ISSUE_METRICS,
+                ["inst"] * 4 + ["%"] * 4,
+                [0, 0, 100, 110, 10.5, 20, 30, 40],
+            )
+        ]
+    )
+    result = parse_issue(text)
+    assert result[ISSUE_METRICS[0]] == 0
+    assert result[ISSUE_METRICS[4]] == 10.5
+    with pytest.raises(ValueError, match="Invalid"):
+        parse_issue(text.replace('"10.5"', '"101"'))
+    with pytest.raises(ValueError, match="Unexpected"):
+        parse_issue(text.replace('"inst"', '"cycle"'))
+    for command in commands("ncu", Path("output"), issue_work=True):
+        assert command[command.index("--metrics") + 1] == ",".join(ISSUE_METRICS)
+        assert command[command.index("--cache-control") + 1] == "all"
+    with pytest.raises(ValueError, match="separate"):
+        commands("ncu", Path("output"), issue_work=True, cache_lookups=True)
 
 
 def csv(values):

@@ -28,6 +28,15 @@ CACHE_METRICS = (
         "lts__t_sectors_op_read_lookup_miss.sum",
     )
 )
+ISSUE_METRICS = (
+    "smsp__sass_inst_executed_op_local_ld.sum",
+    "smsp__sass_inst_executed_op_local_st.sum",
+    "smsp__inst_executed.sum",
+    "smsp__inst_issued.sum",
+) + tuple(
+    f"smsp__warp_issue_stalled_{reason}_per_warp_active.pct"
+    for reason in ("long_scoreboard", "short_scoreboard", "barrier", "wait")
+)
 
 
 def reusable_controls(
@@ -95,8 +104,16 @@ def reusable_controls(
 
 
 def commands(
-    ncu, output, *, allow_idle_graphics=False, suite="pressure", cache_lookups=False
+    ncu,
+    output,
+    *,
+    allow_idle_graphics=False,
+    suite="pressure",
+    cache_lookups=False,
+    issue_work=False,
 ):
+    if cache_lookups and issue_work:
+        raise ValueError("Declare separate counter phases")
     if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
         raise ValueError("Require a declared pressure control suite")
     result = []
@@ -112,7 +129,13 @@ def commands(
             "--clock-control",
             "none",
             "--metrics",
-            ",".join(CACHE_METRICS if cache_lookups else METRICS),
+            ",".join(
+                ISSUE_METRICS
+                if issue_work
+                else CACHE_METRICS
+                if cache_lookups
+                else METRICS
+            ),
             "--csv",
             "--log-file",
             str(output / (case["id"] + ".csv")),
@@ -142,12 +165,14 @@ def main(argv=None):
     parser.add_argument("--allow-idle-graphics", action="store_true")
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--monitor", action="store_true")
-    parser.add_argument("--cache-lookups", action="store_true")
+    phase = parser.add_mutually_exclusive_group()
+    phase.add_argument("--cache-lookups", action="store_true")
+    phase.add_argument("--issue-work", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require a fresh control output directory")
-    if args.cache_lookups and args.resume_from is not None:
-        raise ValueError("Cache lookup phases require fresh complete collection")
+    if (args.cache_lookups or args.issue_work) and args.resume_from is not None:
+        raise ValueError("Additional counter phases require fresh complete collection")
     if (
         args.monitor
         and args.resume_from is not None
@@ -171,6 +196,7 @@ def main(argv=None):
         allow_idle_graphics=args.allow_idle_graphics,
         suite=args.suite,
         cache_lookups=args.cache_lookups,
+        issue_work=args.issue_work,
     )
     hardware = {k: baseline[k] for k in ("uuid", "driver", "index")}
     probe_sha256 = hashlib.sha256(
@@ -204,8 +230,15 @@ def main(argv=None):
             else [],
             hardware=hardware,
             ncu_version=version,
-            metrics=list(CACHE_METRICS if args.cache_lookups else METRICS),
+            metrics=list(
+                ISSUE_METRICS
+                if args.issue_work
+                else CACHE_METRICS
+                if args.cache_lookups
+                else METRICS
+            ),
             cache_lookup_phase=args.cache_lookups,
+            issue_work_phase=args.issue_work,
             eligible_for_latency_fit=False,
             probe_sha256=probe_sha256,
             inherited_controls=reused,
