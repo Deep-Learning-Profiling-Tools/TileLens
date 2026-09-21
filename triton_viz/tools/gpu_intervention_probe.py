@@ -10,6 +10,18 @@ from pathlib import Path
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
+def profile_one_variant(driver, launch, synchronize):
+    """Bracket one precompiled launch; no timer or fallback is used."""
+    if driver.cuProfilerStart():
+        raise RuntimeError("Cannot start control counter range")
+    try:
+        launch()
+        synchronize()
+    finally:
+        if driver.cuProfilerStop():
+            raise RuntimeError("Cannot stop control counter range")
+
+
 def clone_with_binary(compiled, record, binary, *, compiler_version):
     """Pinned Triton loader adaptation; no mutation of the cached original."""
     if compiler_version != "3.7.0":
@@ -79,6 +91,11 @@ def main(argv=None):
     parser.add_argument("--variant", choices=("nounroll", "sync_copy"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
+    parser.add_argument(
+        "--profile-variant",
+        action="store_true",
+        help="Bracket one additional validated variant launch for external counters; no timing",
+    )
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require a fresh verification record")
@@ -123,6 +140,19 @@ def main(argv=None):
         torch.cuda.synchronize()
         assert_available(snapshot(0), own_pid=os.getpid(), allowed_graphics=graphics)
         check_output(case, out)
+    if args.profile_variant:
+        import ctypes
+
+        out.fill_(float("nan"))
+        torch.cuda.synchronize()
+        assert_available(snapshot(0), own_pid=os.getpid(), allowed_graphics=graphics)
+        profile_one_variant(
+            ctypes.CDLL("libcuda.so.1"),
+            lambda: mutated[grid3](*inputs),
+            torch.cuda.synchronize,
+        )
+        assert_available(snapshot(0), own_pid=os.getpid(), allowed_graphics=graphics)
+        check_output(case, out)
     _write(
         args.output,
         dict(
@@ -134,6 +164,7 @@ def main(argv=None):
             numerical_validation="passed",
             eligible_for_fit=False,
             timing_collected=False,
+            profiled_variant_launch=args.profile_variant,
             caveat="Declared deterministic control inputs only. No counter or latency validation; snapshots are not continuous interference monitoring.",
         ),
     )

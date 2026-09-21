@@ -9,6 +9,43 @@ from triton_viz.tools.gpu_intervention_probe import clone_with_binary, load_cont
 from triton_viz.tools.gpu_packing_intervention import disable_backend_unroll
 
 
+@pytest.mark.parametrize("failure", [None, "start", "launch", "sync", "stop"])
+def test_profile_range_is_one_launch_and_stops_on_failure(failure):
+    from triton_viz.tools.gpu_intervention_probe import profile_one_variant
+
+    calls = []
+
+    def marker(name):
+        calls.append(name)
+        return int(failure == name)
+
+    def operation(name):
+        calls.append(name)
+        if failure == name:
+            raise RuntimeError(name)
+
+    driver = SimpleNamespace(
+        cuProfilerStart=lambda: marker("start"), cuProfilerStop=lambda: marker("stop")
+    )
+    if failure is None:
+        profile_one_variant(
+            driver, lambda: operation("launch"), lambda: operation("sync")
+        )
+        assert calls == ["start", "launch", "sync", "stop"]
+    else:
+        with pytest.raises(RuntimeError):
+            profile_one_variant(
+                driver, lambda: operation("launch"), lambda: operation("sync")
+            )
+        assert calls == (
+            ["start"]
+            if failure == "start"
+            else ["start", "launch", "stop"]
+            if failure == "launch"
+            else ["start", "launch", "sync", "stop"]
+        )
+
+
 def fixture():
     compiled = SimpleNamespace(
         kernel=b"original",
