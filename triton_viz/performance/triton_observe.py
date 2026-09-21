@@ -160,6 +160,9 @@ class PerformanceTrace(Client):
             if name in {"binary_op", "unary_op"}:
                 function = next((arg for arg in args if callable(arg)), None)
                 event["primitive"] = getattr(function, "__name__", "unknown")
+                event["operand_dependencies"] = [
+                    self._values.get(id(arr)) for _, arr in arrays
+                ]
             if name in {"load", "raw_load", "store", "raw_store"}:
                 ptr = self._array(args[0])
                 # Memory width comes from the pointer, including masked stores
@@ -233,6 +236,20 @@ class PerformanceTrace(Client):
             if not self.events or self.events[-1]["op"] != name:
                 return
             event = self.events[-1]
+            if name in {
+                "reduce_sum",
+                "reduce_max",
+                "reduce_min",
+                "reduce_xor",
+                "reduce_or",
+            }:
+                # A square input/output shape cannot identify the reduced axis.
+                # Preserve the source argument, never infer it from geometry.
+                axis = args[1] if len(args) > 1 else kwargs.get("axis")
+                axis = getattr(axis, "value", axis)
+                if axis is not None and not isinstance(axis, (int, np.integer)):
+                    raise ValueError("Unsupported source reduction axis")
+                event["reduction_axis"] = None if axis is None else int(axis)
             if name == "dot":
 
                 def operand(index, key):
@@ -265,7 +282,17 @@ class PerformanceTrace(Client):
             before_callback=before if name in {"raw_load", "raw_store"} else None,
             after_callback=after,
             raw_after_callback=raw_after
-            if name in {"store", "raw_store", "dot"}
+            if name
+            in {
+                "store",
+                "raw_store",
+                "dot",
+                "reduce_sum",
+                "reduce_max",
+                "reduce_min",
+                "reduce_xor",
+                "reduce_or",
+            }
             else None,
         )
 

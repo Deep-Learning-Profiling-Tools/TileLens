@@ -15,6 +15,45 @@ def _add(x, y, n: tl.constexpr, BLOCK: tl.constexpr):
     tl.store(y + offsets, value + 1, offsets < n)
 
 
+@triton.jit
+def _square_reduce(x, y, AXIS: tl.constexpr):
+    i = tl.arange(0, 8)
+    tile = tl.load(x + i[:, None] * 8 + i[None, :])
+    result = tl.sum(tile, axis=AXIS) + tl.max(tile, AXIS)
+    tl.store(y + i, result)
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_square_reduction_preserves_axis_without_shape_inference(axis, monkeypatch):
+    import triton_viz
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Source reduction observation cannot compile")
+
+    monkeypatch.setattr(triton.compiler, "compile", forbidden)
+    x = torch.arange(64, dtype=torch.float32).reshape(8, 8)
+    y = torch.empty(8)
+    try:
+        source = observe(_square_reduce, (1,), x, y, axis)
+        torch.testing.assert_close(y, x.sum(axis) + x.max(axis).values)
+        reductions = [
+            e for e in source["events"] if e["op"] in {"reduce_sum", "reduce_max"}
+        ]
+        assert len(reductions) == 2
+        assert all(e["reduction_axis"] == axis for e in reductions)
+        addition = next(
+            e
+            for e in source["events"]
+            if e.get("primitive") == "add" and e["dtype"] == "fp32"
+        )
+        assert addition["operand_dependencies"] == [e["seq"] for e in reductions]
+        assert all(
+            e["input_shapes"] == [[8, 8]] and e["shape"] == [8] for e in reductions
+        )
+    finally:
+        triton_viz.clear()
+
+
 def test_observe_masked_launch_without_compilation(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Observe must not compile the target")
