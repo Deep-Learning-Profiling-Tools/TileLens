@@ -90,9 +90,12 @@ def validate(
     instruction_rows=None,
     region_instruction_rows=None,
     issued_dot=False,
+    scalar_layout=False,
 ):
     if issued_dot and region_instruction_rows is None:
         raise ValueError("Issued dot pricing requires region instruction controls")
+    if scalar_layout and not issued_dot:
+        raise ValueError("Scalar layout pricing requires issued dot candidate")
     shape_groups = {}
     for rows in (
         (counter_rows, latency_rows)
@@ -135,6 +138,12 @@ def validate(
                     "Composition instruction candidate requires source execution regions"
                 )
     for row in latency_rows:
+        if scalar_layout and any(
+            not math.isfinite(row["scalar_pricing_features"][k])
+            or row["scalar_pricing_features"][k] < 0
+            for k in ("sfu_warps", "shuffle_steps")
+        ):
+            raise ValueError("Invalid source scalar-layout work")
         if (
             row.get("eligible_for_fit") is not False
             or not math.isfinite(row["latency_us"])
@@ -159,6 +168,8 @@ def validate(
         names += ("source_plus_region_instruction_work",)
     if issued_dot:
         names += ("source_plus_region_issued_dot_work",)
+    if scalar_layout:
+        names += ("source_plus_scalar_layout_work",)
     cache = {}
 
     def fold(excluded):
@@ -259,6 +270,13 @@ def validate(
                     instruction_features=instruction_features,
                     region_features=region_features,
                     issued_features=issued_features,
+                    scalar_features={
+                        **issued_features,
+                        **row["scalar_pricing_features"],
+                    }
+                    if scalar_layout
+                    else {},
+                    scalar_ood=row.get("scalar_layout_ood", []),
                     region_ood=region_work["ood_reasons"]
                     if region_work is not None
                     else [],
@@ -303,6 +321,11 @@ def validate(
                 [{**r, "features": r["issued_features"]} for r in training],
                 ISSUE_SERVICE_FEATURES,
             )
+        if scalar_layout:
+            models["source_plus_scalar_layout_work"] = service_model(
+                [{**r, "features": r["scalar_features"]} for r in training],
+                ISSUE_SERVICE_FEATURES,
+            )
         predictions = {name: [] for name in names}
         for row in projected:
             if row["group"] not in excluded:
@@ -314,12 +337,15 @@ def validate(
                         "source",
                         "source_plus_region_instruction_work",
                         "source_plus_region_issued_dot_work",
+                        "source_plus_scalar_layout_work",
                     }
                     and not row["pure"]
                 )
                 predicted = service_prediction(
                     models["source" if fallback else name],
-                    row["issued_features"]
+                    row["scalar_features"]
+                    if name == "source_plus_scalar_layout_work"
+                    else row["issued_features"]
                     if name == "source_plus_region_issued_dot_work"
                     else row["region_features"]
                     if name == "source_plus_region_instruction_work"
@@ -332,8 +358,11 @@ def validate(
                 if name in {
                     "source_plus_region_instruction_work",
                     "source_plus_region_issued_dot_work",
+                    "source_plus_scalar_layout_work",
                 }:
                     predicted["ood_reasons"] += row["region_ood"]
+                    if name == "source_plus_scalar_layout_work":
+                        predicted["ood_reasons"] += row["scalar_ood"]
                 elif name == "source_plus_instruction_work":
                     predicted["ood_reasons"] += row["instruction_ood"]
                 elif name == "source_plus_regime_requests":

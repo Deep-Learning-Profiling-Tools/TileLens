@@ -11,6 +11,7 @@ from triton_viz.tools.gpu_instruction_transfer_audit import scale
 def test_region_candidate_preserves_all_rows_and_both_nested_exclusions():
     counters, latencies = data()
     for row in latencies:
+        row["scalar_pricing_features"] = dict(sfu_warps=0, shuffle_steps=0)
         if row["case"]["kind"] != "geometry_dot":
             row["source_program_count"] = 1
             row["source_execution"] = dict(
@@ -34,14 +35,22 @@ def test_region_candidate_preserves_all_rows_and_both_nested_exclusions():
             LDL=2, STL=1, executed=value + 10, issued=value + 10
         )
     first = validate(
-        counters, latencies, region_instruction_rows=instructions, issued_dot=True
+        counters,
+        latencies,
+        region_instruction_rows=instructions,
+        issued_dot=True,
+        scalar_layout=True,
     )
     changed = copy.deepcopy(instructions)
     for row in changed:
         if row["case"]["cv_group"] == "0":
             row["instructions_per_warp"]["executed"] += 99999
     second = validate(
-        counters, latencies, region_instruction_rows=changed, issued_dot=True
+        counters,
+        latencies,
+        region_instruction_rows=changed,
+        issued_dot=True,
+        scalar_layout=True,
     )
     assert first["folds"][0] == second["folds"][0]
     predictions = first["ordinary"]["source_plus_region_instruction_work"]["rows"]
@@ -49,6 +58,7 @@ def test_region_candidate_preserves_all_rows_and_both_nested_exclusions():
     assert first["eligible_for_fit"] is False
     issued = first["ordinary"]["source_plus_region_issued_dot_work"]["rows"]
     assert len(issued) == 8 and not any(r["source_fallback"] for r in issued)
+    assert len(first["ordinary"]["source_plus_scalar_layout_work"]["rows"]) == 8
     for fold in first["folds"]:
         assert all(
             not key.startswith("l" + fold["held_group"] + "_")
