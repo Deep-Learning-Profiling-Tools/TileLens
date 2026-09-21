@@ -7,9 +7,38 @@ from pathlib import Path
 
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 from triton_viz.tools import gpu_resource_transfer_audit as baseline
+from triton_viz.tools.gpu_control_resource_audit import decode_local_allocation
 
 FEATURES = baseline.FEATURE_SETS["initial_layout"]
 SCENARIOS = tuple((depth, leaf) for depth in (2, 4, 8) for leaf in (1, 2, 4))
+
+
+def source_geometry_partition(rows):
+    """Union shared source-dot geometries and declared groups, never labels."""
+    parents = list(range(len(rows)))
+
+    def root(i):
+        while parents[i] != i:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
+        return i
+
+    owners = {}
+    for i, row in enumerate(rows):
+        keys = [("declared", row["case"]["cv_group"])]
+        for a, b in row["dot_shapes"]:
+            if len(a) != 2 or len(b) != 2 or a[1] != b[0]:
+                raise ValueError("Invalid source dot geometry")
+            keys.append(("dot", a[0], b[1], a[1]))
+        for key in keys:
+            if key in owners:
+                parents[root(i)] = root(owners[key])
+            owners[key] = i
+    names = {
+        key: f"source_geometry_component_{i}"
+        for i, key in enumerate(sorted({root(j) for j in range(len(rows))}))
+    }
+    return {row["case"]["id"]: names[root(i)] for i, row in enumerate(rows)}
 
 
 def train(rows, *, depth, leaf):
@@ -199,23 +228,45 @@ def main(argv=None):
     ]
     if len({r["compiler_version"] for r in reports}) != 1:
         raise ValueError("Do not mix compiler policy versions")
-    # Do not silently mix explicit backend stack labels with a fallback inferred
-    # from Triton's spill field; their equivalence needs independent validation.
+    # Explicit and legacy collector fields share the same pinned driver units.
+    label_provenance = []
     for root, report in zip(args.resource_root, reports):
         for row in report["rows"]:
             raw = json.loads(
                 (root / "controls" / (row["case"]["id"] + ".json")).read_text()
             )
-            if "local_bytes_per_thread" not in raw:
-                raise ValueError(
-                    "Require explicit backend local allocation labels for every control"
+            decoded = decode_local_allocation(
+                raw, compiler_version=report["compiler_version"]
+            )
+            if row["local_bytes_per_thread"] != decoded["local_bytes_per_thread"]:
+                raise ValueError("Resource audit label differs from pinned decoder")
+            label_provenance.append(
+                dict(
+                    id=row["case"]["id"],
+                    explicit_field_present="local_bytes_per_thread" in raw,
+                    **decoded,
                 )
+            )
     report = dict(
         role="control",
         complete=True,
         compiler_version=reports[0]["compiler_version"],
         rows=[row for collection in reports for row in collection["rows"]],
     )
+    partition = source_geometry_partition(report["rows"])
+    grouping = [
+        dict(
+            id=r["case"]["id"],
+            declared_group=r["case"]["cv_group"],
+            effective_group=partition[r["case"]["id"]],
+            dot_shapes=r["dot_shapes"],
+        )
+        for r in report["rows"]
+    ]
+    report["rows"] = [
+        {**r, "case": {**r["case"], "cv_group": partition[r["case"]["id"]]}}
+        for r in report["rows"]
+    ]
     # Explicit projection excludes any timing and target fields.
     rows = [
         dict(
@@ -232,6 +283,8 @@ def main(argv=None):
     ]
     result = validate(rows)
     result["compiler_version"] = report["compiler_version"]
+    result["label_provenance"] = label_provenance
+    result["grouping"] = grouping
     reference = baseline.audit(report, feature_set="initial_layout")
     result["nearest_control_baseline"] = {
         k: reference[k]

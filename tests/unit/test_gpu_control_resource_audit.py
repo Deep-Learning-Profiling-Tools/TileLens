@@ -6,6 +6,30 @@ import pytest
 from triton_viz.tools.gpu_control_resource_audit import audit, sass_backedges
 
 
+def test_pinned_local_allocation_decoder_preserves_units_and_checks_agreement():
+    from triton_viz.tools.gpu_control_resource_audit import decode_local_allocation
+
+    legacy = dict(triton_reported_spills=3316)
+    decoded = decode_local_allocation(legacy, compiler_version="3.7.0")
+    assert decoded["local_bytes_per_thread"] == 13264
+    assert decoded["quantization_bytes"] == 4
+    assert (
+        decode_local_allocation(
+            dict(**legacy, local_bytes_per_thread=13264), compiler_version="3.7.0"
+        )
+        == decoded
+    )
+    for invalid in (
+        dict(**legacy, local_bytes_per_thread=3316),
+        dict(triton_reported_spills=-1),
+        dict(triton_reported_spills=True),
+    ):
+        with pytest.raises(ValueError):
+            decode_local_allocation(invalid, compiler_version="3.7.0")
+    with pytest.raises(ValueError, match="compiler version"):
+        decode_local_allocation(legacy, compiler_version="unknown")
+
+
 def test_resources_keep_missing_controls_and_verify_artifacts(tmp_path):
     cases = [{"id": "first"}, {"id": "second"}]
     (tmp_path / "manifest.json").write_text(

@@ -65,3 +65,23 @@ def test_leaf_prediction_uses_the_same_log_space_as_split_objective():
     model = train(rows, depth=0, leaf=1)
     result = predict(model, rows[0]["source_features"], rows[0]["source_precision"])
     assert result["prediction"]["local_bytes_per_thread"] == pytest.approx(101**0.5 - 1)
+
+
+def test_shared_geometries_and_declared_groups_cannot_leak_across_suites():
+    from triton_viz.tools.gpu_resource_tree_audit import source_geometry_partition
+
+    rows = [
+        dict(case=dict(id=str(i), cv_group=g), dot_shapes=shapes)
+        for i, (g, shapes) in enumerate(
+            [
+                ("suite_a", [[[32, 16], [16, 64]]]),
+                ("suite_b", [[[32, 16], [16, 64]], [[32, 64], [64, 32]]]),
+                ("suite_c", [[[32, 64], [64, 32]]]),
+                ("suite_c", [[[16, 16], [16, 16]]]),
+                ("independent", [[[128, 64], [64, 256]]]),
+            ]
+        )
+    ]
+    groups = source_geometry_partition(rows)
+    assert len({groups[str(i)] for i in range(4)}) == 1
+    assert groups["4"] != groups["0"]

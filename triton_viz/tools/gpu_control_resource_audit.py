@@ -12,6 +12,37 @@ from pathlib import Path
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
+def decode_local_allocation(row, *, compiler_version):
+    """Decode the pinned NVIDIA driver resource field, not spill traffic.
+
+    Triton 3.7 driver.c queries CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES and performs
+    integer division by four before returning n_spills. Our explicit-byte
+    collector also multiplies that returned field by four. Both paths therefore
+    encode the SAME four-byte-quantized quantity, not independent measurements.
+    """
+    if compiler_version != "3.7.0":
+        raise ValueError("Unverified resource-field semantics for compiler version")
+    units = row.get("triton_reported_spills")
+    if isinstance(units, bool) or not isinstance(units, int) or units < 0:
+        raise ValueError("Require nonnegative integer driver local-allocation units")
+    value = 4 * units
+    if "local_bytes_per_thread" in row:
+        explicit = row["local_bytes_per_thread"]
+        if (
+            isinstance(explicit, bool)
+            or not isinstance(explicit, int)
+            or explicit != value
+        ):
+            raise ValueError(
+                "Conflicting explicit and driver-derived allocation labels"
+            )
+    return dict(
+        local_bytes_per_thread=value,
+        quantization_bytes=4,
+        provenance="triton_3.7_nvidia_driver_LOCAL_SIZE_BYTES_div4_times4",
+    )
+
+
 def blocked_dot_fragments(ttgir):
     """Expose register-fragment replication in explicit blocked dot layouts.
 
