@@ -15,6 +15,19 @@ METRICS = (
     "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum",
     "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum",
 )
+CACHE_METRICS = (
+    METRICS
+    + tuple(
+        f"l1tex__t_sectors_pipe_lsu_mem_local_op_{op}_lookup_{outcome}.sum"
+        for op in ("ld", "st")
+        for outcome in ("hit", "miss")
+    )
+    + (
+        "lts__t_sectors_op_read.sum",
+        "lts__t_sectors_op_read_lookup_hit.sum",
+        "lts__t_sectors_op_read_lookup_miss.sum",
+    )
+)
 
 
 def reusable_controls(
@@ -81,7 +94,9 @@ def reusable_controls(
     return reused
 
 
-def commands(ncu, output, *, allow_idle_graphics=False, suite="pressure"):
+def commands(
+    ncu, output, *, allow_idle_graphics=False, suite="pressure", cache_lookups=False
+):
     if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
         raise ValueError("Require a declared pressure control suite")
     result = []
@@ -97,7 +112,7 @@ def commands(ncu, output, *, allow_idle_graphics=False, suite="pressure"):
             "--clock-control",
             "none",
             "--metrics",
-            ",".join(METRICS),
+            ",".join(CACHE_METRICS if cache_lookups else METRICS),
             "--csv",
             "--log-file",
             str(output / (case["id"] + ".csv")),
@@ -127,9 +142,12 @@ def main(argv=None):
     parser.add_argument("--allow-idle-graphics", action="store_true")
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--monitor", action="store_true")
+    parser.add_argument("--cache-lookups", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require a fresh control output directory")
+    if args.cache_lookups and args.resume_from is not None:
+        raise ValueError("Cache lookup phases require fresh complete collection")
     if (
         args.monitor
         and args.resume_from is not None
@@ -152,6 +170,7 @@ def main(argv=None):
         args.output,
         allow_idle_graphics=args.allow_idle_graphics,
         suite=args.suite,
+        cache_lookups=args.cache_lookups,
     )
     hardware = {k: baseline[k] for k in ("uuid", "driver", "index")}
     probe_sha256 = hashlib.sha256(
@@ -185,7 +204,8 @@ def main(argv=None):
             else [],
             hardware=hardware,
             ncu_version=version,
-            metrics=list(METRICS),
+            metrics=list(CACHE_METRICS if args.cache_lookups else METRICS),
+            cache_lookup_phase=args.cache_lookups,
             eligible_for_latency_fit=False,
             probe_sha256=probe_sha256,
             inherited_controls=reused,
