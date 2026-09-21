@@ -44,6 +44,32 @@ def mma_v2_warp_layout(m, n, warps, *, chained_dot, compiler_version):
     return layout
 
 
+def mma_v2_issued_work(m, n, k, warps, *, input_dtype, chained_dot, compiler_version):
+    """Conditional per-warp MMA expansion including replicated warp tiles.
+
+    This counts emitted instruction slots, not useful arithmetic, active lanes,
+    allocated registers or runtime. Connectivity and MMA-v2 eligibility are
+    preconditions. Round-up captures warp layouts larger than logical geometry;
+    control compiler/counter evidence must validate the physical execution.
+    """
+    if input_dtype not in {"fp16", "bf16", "tf32"}:
+        raise ValueError("Require supported MMA precision")
+    wm, wn = mma_v2_warp_layout(
+        m, n, warps, chained_dot=chained_dot, compiler_version=compiler_version
+    )
+    ik = 8 if input_dtype == "tf32" else 16
+    if isinstance(k, bool) or not isinstance(k, int) or k < ik or k % ik:
+        raise ValueError("Require complete instruction K tiles")
+    mt, nt = (m + 16 * wm - 1) // (16 * wm), (n + 8 * wn - 1) // (8 * wn)
+    return dict(
+        warp_layout=[wm, wn],
+        instruction_shape=[16, 8, ik],
+        instructions_per_warp=mt * nt * (k // ik),
+        covered_shape=[16 * wm * mt, 8 * wn * nt, k],
+        warp_layout_exceeds_geometry=(16 * wm > m or 8 * wn > n),
+    )
+
+
 def mma_v2_fragments(m, n, k, warps, *, input_dtype, chained_dot, compiler_version):
     """Fully materialized MMA-v2 fragment words, not physical register allocation.
 

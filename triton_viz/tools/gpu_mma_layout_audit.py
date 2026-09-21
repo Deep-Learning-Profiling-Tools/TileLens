@@ -5,7 +5,11 @@ import json
 import re
 from pathlib import Path
 
-from triton_viz.performance.gpu_layout import mma_v2_warp_layout, mma_v2_row_reduction
+from triton_viz.performance.gpu_layout import (
+    mma_v2_warp_layout,
+    mma_v2_row_reduction,
+    mma_v2_issued_work,
+)
 from triton_viz.tools.gpu_control_resource_audit import audit as resource_audit
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
@@ -132,6 +136,41 @@ def source_plans(source, *, compiler_version):
     return plans[0]
 
 
+def source_instruction_plan(source, *, compiler_version):
+    """Conditional instruction slots for the same declared static-region scope."""
+    layouts = source_plans(source, compiler_version=compiler_version)
+    if layouts is None:
+        return None
+    groups = {}
+    for dot in source["dot_ancestry"]:
+        groups.setdefault(tuple(dot["program"]), []).append(dot)
+    signatures = {
+        tuple(tuple(tuple(s) for s in dot["input_shapes"][:2]) for dot in dots)
+        for dots in groups.values()
+    }
+    if len(signatures) != 1:
+        raise ValueError("Nonuniform source dot shapes")
+    precision = source["source_precision"][0]
+    dtype = "tf32" if precision[0] == "fp32" else precision[0]
+    result = []
+    for (a, b), layout in zip(next(iter(signatures)), layouts):
+        if a[1] != b[0]:
+            raise ValueError("Invalid source dot contraction")
+        work = mma_v2_issued_work(
+            a[0],
+            b[1],
+            a[1],
+            int(source["source_features"]["threads_per_program"] // 32),
+            input_dtype=dtype,
+            chained_dot=len(layouts) == 2,
+            compiler_version=compiler_version,
+        )
+        if work["warp_layout"] != layout:
+            raise ValueError("Source layout policy drift")
+        result.append(work)
+    return result
+
+
 def audit(resource_root, source_root):
     resources = resource_audit(resource_root)
     manifest = json.loads((resource_root / "manifest.json").read_text())
@@ -169,6 +208,13 @@ def audit(resource_root, source_root):
             (resource_root / "controls" / (case["id"] + ".json")).read_text()
         )
         observed = compiled_dot_warps(compiled["artifacts"]["ttgir"])
+        work = source_instruction_plan(
+            source, compiler_version=manifest["packages"]["triton"]
+        )
+        cfg = resource["sass_backedges"]
+        straight = cfg is not None and cfg["supported"] and not cfg["regions"]
+        predicted_instructions = sum(p["instructions_per_warp"] for p in work)
+        emitted_instructions = resource["static_sass_counts"].get("HMMA", 0)
         rows.append(
             dict(
                 case=case,
@@ -176,6 +222,12 @@ def audit(resource_root, source_root):
                 prediction=plan,
                 observed=observed,
                 exact_match=plan == observed,
+                instruction_plan=work,
+                instruction_count_applicable=straight,
+                predicted_hmma_instructions_per_warp=predicted_instructions,
+                emitted_static_hmma_instructions=emitted_instructions,
+                exact_instruction_count_match=straight
+                and predicted_instructions == emitted_instructions,
             )
         )
         if case["kind"] == "structure_composition" and case["variant"] >= 1:
@@ -211,6 +263,18 @@ def audit(resource_root, source_root):
         count=len(rows),
         compared_count=sum(r["applicable"] for r in rows),
         exact_count=sum(r.get("exact_match", False) for r in rows),
+        instruction_compared_count=sum(
+            r.get("instruction_count_applicable", False) for r in rows
+        ),
+        instruction_exact_count=sum(
+            r.get("exact_instruction_count_match", False) for r in rows
+        ),
+        warp_replication_count=sum(
+            any(
+                p["warp_layout_exceeds_geometry"] for p in r.get("instruction_plan", [])
+            )
+            for r in rows
+        ),
         reduction_compared_count=sum("exact_reduction_match" in r for r in rows),
         reduction_exact_count=sum(r.get("exact_reduction_match", False) for r in rows),
         reduction_shuffle_exact_count=sum(
