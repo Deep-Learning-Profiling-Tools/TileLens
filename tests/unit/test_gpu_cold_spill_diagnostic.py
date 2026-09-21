@@ -8,6 +8,48 @@ from triton_viz.tools.gpu_cold_spill_diagnostic import request_prediction, valid
 from triton_viz.tools.gpu_instruction_transfer_audit import scale
 
 
+def test_region_candidate_preserves_all_rows_and_both_nested_exclusions():
+    counters, latencies = data()
+    for row in latencies:
+        if row["case"]["kind"] != "geometry_dot":
+            row["source_program_count"] = 1
+            row["source_execution"] = dict(
+                loop_trace=dict(
+                    schema="triton-viz.gpu-source-loops.v1", complete=True, loops=[]
+                ),
+                dot_ancestry=[
+                    dict(
+                        seq=i,
+                        program=[0],
+                        ancestor_dot_seqs=[],
+                        input_shapes=row["dot_shapes"][0],
+                    )
+                    for i in range(5)
+                ],
+            )
+    instructions = copy.deepcopy(latencies)
+    for row in instructions:
+        value = scale(row)
+        row["instructions_per_warp"] = dict(
+            LDL=2, STL=1, executed=value + 10, issued=value + 10
+        )
+    first = validate(counters, latencies, region_instruction_rows=instructions)
+    changed = copy.deepcopy(instructions)
+    for row in changed:
+        if row["case"]["cv_group"] == "0":
+            row["instructions_per_warp"]["executed"] += 99999
+    second = validate(counters, latencies, region_instruction_rows=changed)
+    assert first["folds"][0] == second["folds"][0]
+    predictions = first["ordinary"]["source_plus_region_instruction_work"]["rows"]
+    assert len(predictions) == 8 and not any(r["source_fallback"] for r in predictions)
+    assert first["eligible_for_fit"] is False
+    for fold in first["folds"]:
+        assert all(
+            not key.startswith("l" + fold["held_group"] + "_")
+            for key in fold["region_instruction_training_ids"]
+        )
+
+
 def test_instruction_candidate_excludes_both_nested_validation_layers():
     counters, latencies = data()
     instructions = copy.deepcopy(counters)

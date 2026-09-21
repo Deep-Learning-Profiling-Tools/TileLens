@@ -76,11 +76,18 @@ def request_prediction(training, source, *, separate_single_dot=False):
 
 
 def validate(
-    counter_rows, latency_rows, *, include_regime=False, instruction_rows=None
+    counter_rows,
+    latency_rows,
+    *,
+    include_regime=False,
+    instruction_rows=None,
+    region_instruction_rows=None,
 ):
     shape_groups = {}
-    for rows in (counter_rows, latency_rows) + (
-        (instruction_rows,) if instruction_rows is not None else ()
+    for rows in (
+        (counter_rows, latency_rows)
+        + ((instruction_rows,) if instruction_rows is not None else ())
+        + ((region_instruction_rows,) if region_instruction_rows is not None else ())
     ):
         if not rows or any(r.get("role") != "control" for r in rows):
             raise ValueError("Require control-only data")
@@ -109,6 +116,14 @@ def validate(
     if instruction_rows is not None:
         for row in instruction_rows:
             decompose_work(row)
+    if region_instruction_rows is not None:
+        for row in region_instruction_rows:
+            decompose_work(row)
+        for row in latency_rows:
+            if row["case"]["kind"] != "geometry_dot" and "source_execution" not in row:
+                raise ValueError(
+                    "Composition instruction candidate requires source execution regions"
+                )
     for row in latency_rows:
         if (
             row.get("eligible_for_fit") is not False
@@ -130,6 +145,8 @@ def validate(
         names += ("source_plus_regime_requests",)
     if instruction_rows is not None:
         names += ("source_plus_instruction_work",)
+    if region_instruction_rows is not None:
+        names += ("source_plus_region_instruction_work",)
     cache = {}
 
     def fold(excluded):
@@ -140,6 +157,15 @@ def validate(
         instructions = (
             [r for r in instruction_rows if r["case"]["cv_group"] not in excluded]
             if instruction_rows is not None
+            else None
+        )
+        region_instructions = (
+            [
+                r
+                for r in region_instruction_rows
+                if r["case"]["cv_group"] not in excluded
+            ]
+            if region_instruction_rows is not None
             else None
         )
         projected = []
@@ -154,6 +180,20 @@ def validate(
             features = {k: row["pricing_features"][k] for k in SERVICE_FEATURES}
             regime_features = features.copy()
             instruction_features = features.copy()
+            region_features = features.copy()
+            region_work = (
+                predict_work(region_instructions, row)
+                if region_instructions is not None
+                else None
+            )
+            if region_work is not None:
+                for op, k in zip(WORK_LABELS, INSTRUCTION_WORK):
+                    region_features[k] = (
+                        region_work["instructions_per_warp"][op]
+                        * row["source_features"]["threads_per_program"]
+                        / 32
+                        * row["pricing_features"]["waves"]
+                    )
             work = (
                 predict_work(instructions, row)
                 if pure and instructions is not None
@@ -190,6 +230,10 @@ def validate(
                     features=features,
                     regime_features=regime_features,
                     instruction_features=instruction_features,
+                    region_features=region_features,
+                    region_ood=region_work["ood_reasons"]
+                    if region_work is not None
+                    else [],
                     instruction_ood=work["ood_reasons"]
                     if work is not None
                     else ["instruction_mapping_unmodeled_composition"],
@@ -221,21 +265,33 @@ def validate(
                 [{**r, "features": r["instruction_features"]} for r in pure_training],
                 SERVICE_FEATURES + INSTRUCTION_WORK,
             )
+        if region_instructions is not None:
+            models["source_plus_region_instruction_work"] = service_model(
+                [{**r, "features": r["region_features"]} for r in training],
+                SERVICE_FEATURES + INSTRUCTION_WORK,
+            )
         predictions = {name: [] for name in names}
         for row in projected:
             if row["group"] not in excluded:
                 continue
             for name in names:
-                fallback = name != "source" and not row["pure"]
+                fallback = (
+                    name not in {"source", "source_plus_region_instruction_work"}
+                    and not row["pure"]
+                )
                 predicted = service_prediction(
                     models["source" if fallback else name],
-                    row["instruction_features"]
+                    row["region_features"]
+                    if name == "source_plus_region_instruction_work"
+                    else row["instruction_features"]
                     if name == "source_plus_instruction_work"
                     else row["regime_features"]
                     if name == "source_plus_regime_requests"
                     else row["features"],
                 )
-                if name == "source_plus_instruction_work":
+                if name == "source_plus_region_instruction_work":
+                    predicted["ood_reasons"] += row["region_ood"]
+                elif name == "source_plus_instruction_work":
                     predicted["ood_reasons"] += row["instruction_ood"]
                 elif name == "source_plus_regime_requests":
                     predicted["ood_reasons"] += row["regime_ood"]
@@ -256,6 +312,15 @@ def validate(
             counter_training_ids=[r["case"]["id"] for r in counters],
             latency_training_ids=[r["id"] for r in training],
             request_service_training_ids=[r["id"] for r in pure_training],
+            **(
+                dict(
+                    region_instruction_training_ids=[
+                        r["case"]["id"] for r in region_instructions
+                    ]
+                )
+                if region_instructions is not None
+                else {}
+            ),
             **(
                 dict(instruction_training_ids=[r["case"]["id"] for r in instructions])
                 if instructions is not None
@@ -321,5 +386,5 @@ def validate(
             )
             for excluded, result in sorted(cache.items())
         ],
-        caveat="Request service diagnostic, not cache misses or an admitted latency model. Compositions use explicit source fallback; all controls retained. No target artifacts.",
+        caveat="Request/instruction service diagnostic, not cache misses or an admitted latency model. Legacy composition paths retain explicit source fallback; opt-in region instruction paths retain conditional-lowering OOD. All controls retained. No target artifacts.",
     )
