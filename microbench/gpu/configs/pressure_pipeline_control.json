@@ -1,0 +1,6 @@
+{
+  "schema": "triton-viz.gpu-pressure-pipeline-controls.v1",
+  "role": "control",
+  "template_suite": "pressure",
+  "num_stages": 2
+}

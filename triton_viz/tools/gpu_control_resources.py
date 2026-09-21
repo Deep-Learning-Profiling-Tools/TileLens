@@ -23,6 +23,7 @@ def selected_controls(suite):
         "geometry",
         "structure",
         "pressure",
+        "pressure_pipeline",
         "resource_transfer",
         "composition_component",
     }:
@@ -43,6 +44,7 @@ def main(argv=None):
             "geometry",
             "structure",
             "pressure",
+            "pressure_pipeline",
             "resource_transfer",
             "composition_component",
         ),

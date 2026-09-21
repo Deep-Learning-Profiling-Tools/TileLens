@@ -17,12 +17,30 @@ def load_cases(suite, role):
         "structure",
         "stability",
         "pressure",
+        "pressure_pipeline",
         "resource_transfer",
         "composition_component",
     }:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "pressure_pipeline":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "pressure_pipeline_control.json").read_text())
+        if (
+            data["schema"],
+            data["role"],
+            data["template_suite"],
+            data["num_stages"],
+        ) != ("triton-viz.gpu-pressure-pipeline-controls.v1", "control", "pressure", 2):
+            raise ValueError("Invalid matched pressure pipeline declaration")
+        templates = load_cases("pressure", "control")
+        if any(case["num_stages"] != 1 for case in templates):
+            raise ValueError("Matched pipeline controls require stage-1 templates")
+        return [
+            {**case, "id": case["id"] + "_s2", "num_stages": 2} for case in templates
+        ]
     if suite == "composition_component":
         if role == "holdout":
             return []

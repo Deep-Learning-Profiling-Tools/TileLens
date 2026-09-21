@@ -14,6 +14,21 @@ def test_pressure_matrix_keeps_all_declared_combinations():
     assert len({c["cv_group"] for c in cases}) == 4
 
 
+def test_pipeline_controls_change_only_stage_and_identity():
+    from triton_viz.tools.gpu_control_resources import selected_controls
+
+    original = load_cases("pressure", "control")
+    paired = load_cases("pressure_pipeline", "control")
+    assert len(paired) == 32
+    assert load_cases("pressure_pipeline", "holdout") == []
+    assert selected_controls("pressure_pipeline") == paired
+    for first, second in zip(original, paired):
+        assert first["num_stages"] == 1
+        assert second == {**first, "id": first["id"] + "_s2", "num_stages": 2}
+        assert second["cv_group"] == first["cv_group"]
+    assert original == load_cases("pressure", "control")
+
+
 @pytest.mark.parametrize(
     "dtype,precision",
     [
@@ -23,7 +38,10 @@ def test_pressure_matrix_keeps_all_declared_combinations():
         ("float16", "ieee"),
     ],
 )
-def test_largest_pressure_tile_source_before_compile(dtype, precision, monkeypatch):
+@pytest.mark.parametrize("suite", ["pressure", "pressure_pipeline"])
+def test_largest_pressure_tile_source_before_compile(
+    dtype, precision, suite, monkeypatch
+):
     import torch
     import triton
     import triton_viz
@@ -37,7 +55,7 @@ def test_largest_pressure_tile_source_before_compile(dtype, precision, monkeypat
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
     case = next(
         c
-        for c in load_cases("pressure", "control")
+        for c in load_cases(suite, "control")
         if c["bm"] == c["bn"] == 256
         and c["dtype"] == dtype
         and c["precision"] == precision

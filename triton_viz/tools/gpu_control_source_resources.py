@@ -18,7 +18,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("geometry", "pressure", "resource_transfer", "composition_component"),
+        choices=(
+            "geometry",
+            "pressure",
+            "pressure_pipeline",
+            "resource_transfer",
+            "composition_component",
+        ),
         required=True,
     )
     parser.add_argument("--output", type=Path, required=True)
