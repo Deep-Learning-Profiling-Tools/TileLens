@@ -5,6 +5,25 @@ from triton_viz.performance.gpu_layout import ieee_row_store_exchange
 
 
 @pytest.mark.parametrize(
+    "m,warps,shuffles,barriers",
+    [
+        (32, 4, 10, 2),
+        (32, 8, 11, 2),
+        (64, 4, 4, 0),
+        (64, 8, 4, 0),
+    ],
+)
+def test_mma_row_reduction_separates_partial_reductions(m, warps, shuffles, barriers):
+    from triton_viz.performance.gpu_layout import mma_v2_row_reduction
+
+    plan = mma_v2_row_reduction(
+        m, 64, warps, chained_dot=True, compiler_version="3.7.0"
+    )
+    assert plan["total_shuffles"] == shuffles
+    assert plan["reduction_barriers"] == barriers
+
+
+@pytest.mark.parametrize(
     "m,n,w,rounds",
     [(128, 256, 4, 32), (128, 256, 8, 8), (128, 64, 4, 4), (128, 64, 8, 2)],
 )

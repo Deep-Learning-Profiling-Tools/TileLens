@@ -44,6 +44,33 @@ def mma_v2_warp_layout(m, n, warps, *, chained_dot, compiler_version):
     return layout
 
 
+def mma_v2_row_reduction(m, n, warps, *, chained_dot, compiler_version):
+    """Static FP32 sum/max shuffle expansion for axis-1 MMA-v2 reduction.
+
+    One scalar reduction, not normalization or layout-conversion costs. MMA-v2
+    has two row registers and four column lanes per 16x8 instruction tile.
+    Cross-warp partials use the scratch/second-shuffle scheme in Triton 3.7
+    ReduceOpToLLVM. Counts are static per-thread instructions, not time.
+    """
+    wm, wn = mma_v2_warp_layout(
+        m, n, warps, chained_dot=chained_dot, compiler_version=compiler_version
+    )
+    row_registers = 2 * math.ceil(m / (16 * wm))
+    column_warps = min(wn, n // 8)
+    within = row_registers * 2  # log2(4) column lanes
+    cross = 0
+    if column_warps > 1:
+        scratch_rounds = max(m * column_warps // (32 * warps), 1)
+        cross = scratch_rounds * (column_warps.bit_length() - 1)
+    return dict(
+        warp_layout=[wm, wn],
+        within_warp_shuffles=within,
+        partial_reduction_shuffles=cross,
+        total_shuffles=within + cross,
+        reduction_barriers=2 if column_warps > 1 else 0,
+    )
+
+
 def initial_ieee_dot_layout(m, n, k, warps, *, compiler_version):
     """Describe one CTA of a power-of-two FP32 IEEE dot without compilation."""
     if compiler_version != "3.7.0":

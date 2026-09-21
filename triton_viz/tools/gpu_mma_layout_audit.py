@@ -5,9 +5,43 @@ import json
 import re
 from pathlib import Path
 
-from triton_viz.performance.gpu_layout import mma_v2_warp_layout
+from triton_viz.performance.gpu_layout import mma_v2_warp_layout, mma_v2_row_reduction
 from triton_viz.tools.gpu_control_resource_audit import audit as resource_audit
 from triton_viz.tools.gpu_cost_model_pipeline import _write
+
+
+def reduction_instruction_labels(ptx):
+    """Control labels from pinned standard.py max/sum locations, never features.
+
+    Keep all other shuffles separate; casting/layout conversions can emit many
+    shuffles that must not be silently charged as reductions.
+    """
+    files = {
+        int(index): Path(path).name
+        for index, path in re.findall(r'\.file\s+(\d+)\s+"([^"]+)"', ptx)
+    }
+    counts = {op: dict(shuffles=0, barriers=0) for op in ("max", "sum", "other")}
+    locations = {191: "max", 293: "sum"}  # Triton 3.7 standard.py
+    active = "other"
+    seen = set()
+    for raw in ptx.splitlines():
+        line = raw.split("//", 1)[0]
+        loc = re.search(r"\.loc\s+(\d+)\s+(\d+)\s", line)
+        if loc:
+            file_id, lineno = map(int, loc.groups())
+            active = (
+                locations.get(lineno, "other")
+                if files.get(file_id) == "standard.py"
+                else "other"
+            )
+            seen.add(active)
+        if re.search(r"\bshfl\.sync\.", line):
+            counts[active]["shuffles"] += 1
+        if re.search(r"\bbar\.sync\s", line):
+            counts[active]["barriers"] += 1
+    if not {"max", "sum"} <= seen:
+        raise ValueError("Missing pinned control reduction locations")
+    return counts
 
 
 def compiled_dot_warps(ttgir):
@@ -136,12 +170,44 @@ def audit(resource_root, source_root):
                 exact_match=plan == observed,
             )
         )
+        if case["kind"] == "structure_composition" and case["variant"] >= 1:
+            first = source["dot_ancestry"][0]
+            m, n = first["input_shapes"][0][0], first["input_shapes"][1][1]
+            reduction = mma_v2_row_reduction(
+                m,
+                n,
+                int(source["source_features"]["threads_per_program"] // 32),
+                chained_dot=len(plan) == 2,
+                compiler_version=manifest["packages"]["triton"],
+            )
+            labels = reduction_instruction_labels(compiled["artifacts"]["ptx"])
+            rows[-1].update(
+                reduction_prediction=reduction,
+                reduction_labels=labels,
+                exact_reduction_shuffle_match=all(
+                    labels[op]["shuffles"] == reduction["total_shuffles"]
+                    for op in ("max", "sum")
+                ),
+                exact_reduction_match=all(
+                    labels[op]
+                    == dict(
+                        shuffles=reduction["total_shuffles"],
+                        barriers=reduction["reduction_barriers"],
+                    )
+                    for op in ("max", "sum")
+                ),
+            )
     return dict(
         role="control",
         eligible_for_fit=False,
         count=len(rows),
         compared_count=sum(r["applicable"] for r in rows),
         exact_count=sum(r.get("exact_match", False) for r in rows),
+        reduction_compared_count=sum("exact_reduction_match" in r for r in rows),
+        reduction_exact_count=sum(r.get("exact_reduction_match", False) for r in rows),
+        reduction_shuffle_exact_count=sum(
+            r.get("exact_reduction_shuffle_match", False) for r in rows
+        ),
         rows=rows,
     )
 

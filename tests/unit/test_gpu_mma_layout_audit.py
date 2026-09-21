@@ -1,6 +1,33 @@
 import pytest
 
-from triton_viz.tools.gpu_mma_layout_audit import compiled_dot_warps, source_plans
+from triton_viz.tools.gpu_mma_layout_audit import (
+    compiled_dot_warps,
+    source_plans,
+    reduction_instruction_labels,
+)
+
+
+def test_reduction_labels_do_not_absorb_layout_conversion_instructions():
+    ptx = """
+.file 1 "/control/structure.py"
+.file 2 "/triton/language/standard.py"
+.loc 2 191 40
+shfl.sync.bfly.b32 %r0, %r1, 1, 31, -1;
+bar.sync 0;
+.loc 2 293 36
+shfl.sync.bfly.b32 %r0, %r1, 1, 31, -1;
+.loc 1 52 16
+shfl.sync.bfly.b32 %r0, %r1, 1, 31, -1;
+// bar.sync 0;
+"""
+    labels = reduction_instruction_labels(ptx)
+    assert labels == dict(
+        max=dict(shuffles=1, barriers=1),
+        sum=dict(shuffles=1, barriers=0),
+        other=dict(shuffles=1, barriers=0),
+    )
+    with pytest.raises(ValueError, match="locations"):
+        reduction_instruction_labels(ptx.replace(".loc 2 293 36", ".loc 2 999 36"))
 
 
 def observation():
