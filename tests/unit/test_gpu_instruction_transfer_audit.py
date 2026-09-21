@@ -2,8 +2,58 @@ import copy
 
 import pytest
 
-from triton_viz.tools.gpu_instruction_transfer_audit import LABELS, predict, validate
+from triton_viz.tools.gpu_instruction_transfer_audit import (
+    LABELS,
+    predict,
+    validate,
+    decompose_work,
+    predict_work,
+    scale,
+)
 from triton_viz.tools.gpu_spill_transfer_audit import FEATURES
+
+
+def work_controls():
+    rows = controls()
+    for g, row in enumerate(rows):
+        executed = scale(row) + 10 * g + 5 * g + 20 * g
+        row["instructions_per_warp"] = dict(
+            LDL=10 * g, STL=5 * g, executed=executed, issued=executed
+        )
+    return rows
+
+
+def test_work_decomposition_conserves_instructions_and_rejects_negative_residual():
+    rows = work_controls()
+    for row in rows:
+        assert (
+            sum(decompose_work(row).values()) + scale(row)
+            == row["instructions_per_warp"]["executed"]
+        )
+    rows[0]["instructions_per_warp"]["executed"] = 0
+    with pytest.raises(ValueError, match="negative residual"):
+        decompose_work(rows[0])
+
+
+def test_work_prediction_does_not_decompose_query_labels():
+    rows = work_controls()
+    first = validate(rows, components=True)
+    changed = copy.deepcopy(rows)
+    changed[0]["instructions_per_warp"]["executed"] += 99999
+    assert (
+        first["rows"][0]["instructions_per_warp"]
+        == validate(changed, components=True)["rows"][0]["instructions_per_warp"]
+    )
+    source = {
+        k: rows[0][k]
+        for k in (
+            "compiler_version",
+            "dot_shapes",
+            "source_precision",
+            "source_features",
+        )
+    }
+    assert predict_work(rows[1:], source) == predict_work(rows[1:], changed[0])
 
 
 def controls():

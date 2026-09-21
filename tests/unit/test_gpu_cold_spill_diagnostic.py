@@ -5,6 +5,35 @@ import pytest
 from triton_viz.tools.gpu_cold_resource_diagnostic import SERVICE_FEATURES
 from triton_viz.tools.gpu_spill_transfer_audit import FEATURES
 from triton_viz.tools.gpu_cold_spill_diagnostic import request_prediction, validate
+from triton_viz.tools.gpu_instruction_transfer_audit import scale
+
+
+def test_instruction_candidate_excludes_both_nested_validation_layers():
+    counters, latencies = data()
+    instructions = copy.deepcopy(counters)
+    for g, row in enumerate(instructions):
+        row["instructions_per_warp"] = dict(
+            LDL=10 * g,
+            STL=5 * g,
+            executed=scale(row) + 30 * g,
+            issued=scale(row) + 30 * g,
+        )
+    first = validate(
+        counters, latencies, include_regime=True, instruction_rows=instructions
+    )
+    changed = copy.deepcopy(instructions)
+    changed[0]["instructions_per_warp"]["executed"] += 99999
+    second = validate(
+        counters, latencies, include_regime=True, instruction_rows=changed
+    )
+    assert first["folds"][0] == second["folds"][0]
+    assert first["count"] == 8
+    assert "source_plus_instruction_work" in first["ordinary"]
+    base = {r["id"]: r for r in first["ordinary"]["source"]["rows"]}
+    for row in first["ordinary"]["source_plus_instruction_work"]["rows"]:
+        if row["source_fallback"]:
+            assert row["prediction_us"] == base[row["id"]]["prediction_us"]
+            assert "instruction_mapping_unmodeled_composition" in row["ood_reasons"]
 
 
 def data():

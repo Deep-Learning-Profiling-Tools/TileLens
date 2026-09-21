@@ -15,6 +15,20 @@ from triton_viz.tools.gpu_spill_transfer_audit import (
 )
 
 LABELS = ("LDL", "STL", "executed", "issued")
+WORK_LABELS = ("LDL", "STL", "other")
+
+
+def decompose_work(row):
+    """Disjoint training-label components; never clamp inconsistent evidence."""
+    if row.get("role") != "control":
+        raise ValueError("Instruction decomposition requires control labels")
+    measured = row["instructions_per_warp"]
+    if any(not math.isfinite(measured[k]) or measured[k] < 0 for k in LABELS):
+        raise ValueError("Invalid instruction label")
+    other = measured["executed"] - measured["LDL"] - measured["STL"] - scale(row)
+    if other < 0:
+        raise ValueError("Instruction decomposition has negative residual work")
+    return dict(LDL=measured["LDL"], STL=measured["STL"], other=other)
 
 
 def scale(row):
@@ -24,7 +38,7 @@ def scale(row):
     return value
 
 
-def predict(training, source):
+def _predict(training, source, labels):
     if not training or any(r.get("role") != "control" for r in training):
         raise ValueError("Require control instruction training")
     for row in [*training, source]:
@@ -38,7 +52,7 @@ def predict(training, source):
         if any(
             not math.isfinite(row["instructions_per_warp"][k])
             or row["instructions_per_warp"][k] < 0
-            for k in LABELS
+            for k in labels
         ):
             raise ValueError("Invalid instruction label")
     domain = {
@@ -63,7 +77,7 @@ def predict(training, source):
         k: scale(source)
         * sum(r["instructions_per_warp"][k] / scale(r) for r in nearest)
         / len(nearest)
-        for k in LABELS
+        for k in labels
     }
     return dict(
         instructions_per_warp=predicted,
@@ -77,7 +91,20 @@ def predict(training, source):
     )
 
 
-def validate(rows):
+def predict(training, source):
+    return _predict(training, source, LABELS)
+
+
+def predict_work(training, source):
+    # Transform only training labels. The query never needs its own compiled
+    # instruction count and cannot leak it through the decomposition.
+    decomposed = [
+        {**row, "instructions_per_warp": decompose_work(row)} for row in training
+    ]
+    return _predict(decomposed, source, WORK_LABELS)
+
+
+def validate(rows, *, components=False):
     if not rows or any(r.get("role") != "control" for r in rows):
         raise ValueError("Require control instruction rows")
     if len({r["case"]["id"] for r in rows}) != len(rows):
@@ -108,16 +135,18 @@ def validate(rows):
             predictions.append(
                 dict(
                     case=row["case"],
-                    actual=row["instructions_per_warp"],
+                    actual=decompose_work(row)
+                    if components
+                    else row["instructions_per_warp"],
                     warp_count=row["source_program_count"]
                     * row["source_features"]["threads_per_program"]
                     / 32,
                     training_ids=[r["case"]["id"] for r in training],
-                    **predict(training, row),
+                    **(predict_work if components else predict)(training, row),
                 )
             )
     metrics = {}
-    for name in LABELS:
+    for name in WORK_LABELS if components else LABELS:
         measured = sum(r["actual"][name] * r["warp_count"] for r in predictions)
         difference = sum(
             abs(r["actual"][name] - r["instructions_per_warp"][name]) * r["warp_count"]
@@ -144,6 +173,7 @@ def validate(rows):
     return dict(
         role="control",
         count=len(rows),
+        components=components,
         eligible_for_fit=False,
         released_model=None,
         rows=predictions,

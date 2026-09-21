@@ -18,8 +18,14 @@ from triton_viz.tools.gpu_spill_transfer_audit import (
     dot_instructions,
     request_candidates,
 )
+from triton_viz.tools.gpu_instruction_transfer_audit import (
+    WORK_LABELS,
+    decompose_work,
+    predict_work,
+)
 
 REQUESTS = tuple("predicted_wave_" + op for op in OPS)
+INSTRUCTION_WORK = tuple("predicted_wave_instruction_" + op for op in WORK_LABELS)
 
 
 def request_prediction(training, source, *, separate_single_dot=False):
@@ -69,9 +75,13 @@ def request_prediction(training, source, *, separate_single_dot=False):
     )
 
 
-def validate(counter_rows, latency_rows, *, include_regime=False):
+def validate(
+    counter_rows, latency_rows, *, include_regime=False, instruction_rows=None
+):
     shape_groups = {}
-    for rows in (counter_rows, latency_rows):
+    for rows in (counter_rows, latency_rows) + (
+        (instruction_rows,) if instruction_rows is not None else ()
+    ):
         if not rows or any(r.get("role") != "control" for r in rows):
             raise ValueError("Require control-only data")
         if len({r["case"]["id"] for r in rows}) != len(rows):
@@ -96,6 +106,9 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
             for op in OPS
         ):
             raise ValueError("Invalid measured counter")
+    if instruction_rows is not None:
+        for row in instruction_rows:
+            decompose_work(row)
     for row in latency_rows:
         if (
             row.get("eligible_for_fit") is not False
@@ -115,6 +128,8 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
     names = ("source", "source_pure", "source_plus_requests")
     if include_regime:
         names += ("source_plus_regime_requests",)
+    if instruction_rows is not None:
+        names += ("source_plus_instruction_work",)
     cache = {}
 
     def fold(excluded):
@@ -122,6 +137,11 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
         if key in cache:
             return cache[key]
         counters = [r for r in counter_rows if r["case"]["cv_group"] not in excluded]
+        instructions = (
+            [r for r in instruction_rows if r["case"]["cv_group"] not in excluded]
+            if instruction_rows is not None
+            else None
+        )
         projected = []
         for row in latency_rows:
             pure = row["case"]["kind"] == "geometry_dot"
@@ -133,6 +153,20 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
             )
             features = {k: row["pricing_features"][k] for k in SERVICE_FEATURES}
             regime_features = features.copy()
+            instruction_features = features.copy()
+            work = (
+                predict_work(instructions, row)
+                if pure and instructions is not None
+                else None
+            )
+            if work is not None:
+                for op, k in zip(WORK_LABELS, INSTRUCTION_WORK):
+                    instruction_features[k] = (
+                        work["instructions_per_warp"][op]
+                        * row["source_features"]["threads_per_program"]
+                        / 32
+                        * row["pricing_features"]["waves"]
+                    )
             if pure:
                 for op, k in zip(OPS, REQUESTS):
                     features[k] = (
@@ -155,6 +189,10 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
                     pure=pure,
                     features=features,
                     regime_features=regime_features,
+                    instruction_features=instruction_features,
+                    instruction_ood=work["ood_reasons"]
+                    if work is not None
+                    else ["instruction_mapping_unmodeled_composition"],
                     regime_ood=regime["ood_reasons"]
                     if regime
                     else ["spill_mapping_unmodeled_composition"],
@@ -178,6 +216,11 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
                 [{**r, "features": r["regime_features"]} for r in pure_training],
                 SERVICE_FEATURES + REQUESTS,
             )
+        if instructions is not None:
+            models["source_plus_instruction_work"] = service_model(
+                [{**r, "features": r["instruction_features"]} for r in pure_training],
+                SERVICE_FEATURES + INSTRUCTION_WORK,
+            )
         predictions = {name: [] for name in names}
         for row in projected:
             if row["group"] not in excluded:
@@ -186,11 +229,15 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
                 fallback = name != "source" and not row["pure"]
                 predicted = service_prediction(
                     models["source" if fallback else name],
-                    row["regime_features"]
+                    row["instruction_features"]
+                    if name == "source_plus_instruction_work"
+                    else row["regime_features"]
                     if name == "source_plus_regime_requests"
                     else row["features"],
                 )
-                if name == "source_plus_regime_requests":
+                if name == "source_plus_instruction_work":
+                    predicted["ood_reasons"] += row["instruction_ood"]
+                elif name == "source_plus_regime_requests":
                     predicted["ood_reasons"] += row["regime_ood"]
                 elif name == "source_plus_requests" or fallback:
                     predicted["ood_reasons"] += row["counter_ood"]
@@ -209,6 +256,11 @@ def validate(counter_rows, latency_rows, *, include_regime=False):
             counter_training_ids=[r["case"]["id"] for r in counters],
             latency_training_ids=[r["id"] for r in training],
             request_service_training_ids=[r["id"] for r in pure_training],
+            **(
+                dict(instruction_training_ids=[r["case"]["id"] for r in instructions])
+                if instructions is not None
+                else {}
+            ),
         )
         return cache[key]
 
