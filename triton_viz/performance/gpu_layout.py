@@ -43,3 +43,74 @@ def initial_ieee_dot_layout(m, n, k, warps, *, compiler_version):
         accumulator_words_per_thread=math.prod(fragment),
         fully_materialized_operand_words_per_thread=k * sum(fragment),
     )
+
+
+def ieee_row_store_exchange(m, n, warps, *, compiler_version, alignment_bytes):
+    """Conditional Level-A exchange plan for aligned contiguous FP32 row stores.
+
+    Axis-aligned, non-broadcast blocked layouts only. Common register-coordinate
+    bits become repetitions except the common contiguous 128-bit vector. This
+    models the conversion itself, not surrounding scratch hazards or pipeline
+    drains. Warp-only conversions need a separate shuffle/fallback model.
+    """
+    if alignment_bytes != 16 or isinstance(alignment_bytes, bool):
+        raise ValueError("Require the validated 16-byte store alignment contract")
+    src = initial_ieee_dot_layout(m, n, 1, warps, compiler_version=compiler_version)
+    size = [1, min(n, 4)]
+    n_threads = min(32 * warps, n // size[1])
+    n_lanes = min(32, n_threads)
+    n_warps = max(1, n_threads // n_lanes)
+    dst = dict(
+        size_per_thread=size,
+        threads_per_warp=[32 // n_lanes, n_lanes],
+        warps_per_cta=[warps // n_warps, n_warps],
+        order=[1, 0],
+    )
+
+    def ownership(layout):
+        registers, lanes, cta_warps = set(), [], []
+        for axis in (1, 0):
+            dim = (m, n)[axis]
+            size_words, lane_count, warp_count = (
+                layout[key][axis]
+                for key in ("size_per_thread", "threads_per_warp", "warps_per_cta")
+            )
+            if size_words * lane_count * warp_count > dim:
+                raise ValueError(
+                    "Broadcast layouts require separate exchange accounting"
+                )
+            sb, lb, wb, db = (
+                x.bit_length() - 1 for x in (size_words, lane_count, warp_count, dim)
+            )
+            registers.update((axis, b) for b in range(sb))
+            lanes.extend((axis, b) for b in range(sb, sb + lb))
+            cta_warps.extend((axis, b) for b in range(sb + lb, sb + lb + wb))
+            registers.update((axis, b) for b in range(sb + lb + wb, db))
+        return registers, lanes, cta_warps
+
+    sr, sl, sw = ownership(src)
+    dr, dl, dw = ownership(dst)
+    base = dict(source_layout=src, destination_layout=dst)
+    if sw == dw:
+        same_thread = sl == dl
+        return dict(
+            **base,
+            kind="thread" if same_thread else "warp",
+            shared_rounds=0 if same_thread else None,
+            conversion_barriers=0 if same_thread else None,
+            reason=None if same_thread else "warp_shuffle_or_shared_fallback_unmodeled",
+        )
+    common = sr & dr
+    contiguous_bits = 0
+    while contiguous_bits < 2 and (1, contiguous_bits) in common:
+        contiguous_bits += 1
+    rounds = 2 ** (len(common) - contiguous_bits)
+    return dict(
+        **base,
+        kind="shared",
+        shared_rounds=rounds,
+        conversion_barriers=2 * rounds - 1,
+        vector_words=2**contiguous_bits,
+        shared_payload_bytes_per_program=2 * m * n * 4,
+        reason=None,
+    )

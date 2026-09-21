@@ -1,6 +1,32 @@
 import pytest
 
 from triton_viz.performance.gpu_layout import initial_ieee_dot_layout
+from triton_viz.performance.gpu_layout import ieee_row_store_exchange
+
+
+@pytest.mark.parametrize(
+    "m,n,w,rounds",
+    [(128, 256, 4, 32), (128, 256, 8, 8), (128, 64, 4, 4), (128, 64, 8, 2)],
+)
+def test_row_store_exchange_accounts_for_repeated_shared_tiles(m, n, w, rounds):
+    result = ieee_row_store_exchange(
+        m, n, w, compiler_version="3.7.0", alignment_bytes=16
+    )
+    assert result["kind"] == "shared" and result["shared_rounds"] == rounds
+    assert result["conversion_barriers"] == 2 * rounds - 1
+    assert result["shared_payload_bytes_per_program"] == 2 * m * n * 4
+
+
+def test_warp_only_exchange_is_not_silently_priced_as_free():
+    result = ieee_row_store_exchange(
+        32, 64, 8, compiler_version="3.7.0", alignment_bytes=16
+    )
+    assert result["kind"] == "warp" and result["conversion_barriers"] is None
+    assert result["reason"] == "warp_shuffle_or_shared_fallback_unmodeled"
+    with pytest.raises(ValueError, match="alignment"):
+        ieee_row_store_exchange(
+            128, 256, 4, compiler_version="3.7.0", alignment_bytes=8
+        )
 
 
 def test_source_only_layout_reproduces_blocked_component_geometry():
