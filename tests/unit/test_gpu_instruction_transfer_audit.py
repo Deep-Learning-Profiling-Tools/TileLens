@@ -13,6 +13,51 @@ from triton_viz.tools.gpu_instruction_transfer_audit import (
 from triton_viz.tools.gpu_spill_transfer_audit import FEATURES
 
 
+def test_execution_scale_accounts_for_chained_warp_replication_without_labels():
+    row = controls()[0]
+    row.update(source_program_count=1, source_precision=[["bf16", "bf16", "ieee"]])
+    row["source_features"]["threads_per_program"] = 256
+    row["source_features"]["dots_per_program"] = 2
+    row["source_execution"] = dict(
+        loop_trace=dict(
+            schema="triton-viz.gpu-source-loops.v1", complete=True, loops=[]
+        ),
+        dot_ancestry=[
+            dict(
+                seq=0,
+                program=[0],
+                ancestor_dot_seqs=[],
+                input_shapes=[[64, 32], [32, 64]],
+            ),
+            dict(
+                seq=1,
+                program=[0],
+                ancestor_dot_seqs=[0],
+                input_shapes=[[64, 64], [64, 64]],
+            ),
+        ],
+    )
+    assert scale(row) == 48
+    clean = {
+        k: v
+        for k, v in row.items()
+        if k not in {"case", "role", "instructions_per_warp"}
+    }
+    assert scale(clean) == 48
+    training = work_controls()[1:]
+    for control in training:
+        control["source_precision"] = [["bf16", "bf16", "ieee"]]
+    first = predict_work(training, clean)
+    row["instructions_per_warp"] = dict.fromkeys(LABELS, 999999)
+    assert predict_work(training, row) == first
+    assert "instruction_region_lowering_conditional" in first["ood_reasons"]
+    row["source_program_count"] = 2
+    with pytest.raises(ValueError, match="complete uniform"):
+        scale(row)
+    clean["source_precision"] = [["fp32", "fp32", "ieee"]]
+    assert scale(clean) == (64 * 32 * 64 + 64 * 64 * 64) // 256
+
+
 def work_controls():
     rows = controls()
     for g, row in enumerate(rows):

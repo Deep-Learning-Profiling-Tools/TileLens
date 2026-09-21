@@ -32,7 +32,74 @@ def decompose_work(row):
 
 
 def scale(row):
+    if "source_execution" in row:
+        return execution_scale(row)
     value = dot_instructions(row) * row["source_features"]["dots_per_program"]
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Invalid source dot instruction scale")
+    return value
+
+
+def execution_scale(row):
+    """Experimental observed-region work, without reading compiler/query labels.
+
+    Requires uniform program work. Compiler-region eligibility is still a
+    separate admission check; this function does not certify arbitrary kernels.
+    """
+    from triton_viz.performance.gpu_source_regions import (
+        conditional_mma_work,
+        dot_execution_regions,
+    )
+
+    if row["compiler_version"] != "3.7.0":
+        raise ValueError("Unverified compiler expansion policy")
+    source = row["source_execution"]
+    regions = dot_execution_regions(source["dot_ancestry"], source["loop_trace"])
+    count = row["source_program_count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError("Invalid source program count")
+    threads = row["source_features"]["threads_per_program"]
+    if (
+        isinstance(threads, bool)
+        or not isinstance(threads, int)
+        or threads <= 0
+        or threads % 32
+    ):
+        raise ValueError("Invalid source thread count")
+    if row["source_precision"] == [["fp32", "fp32", "ieee"]]:
+        programs = {}
+        for region in regions["regions"]:
+            program = tuple(region["program"])
+            for a, b in region["dot_shapes"]:
+                if (
+                    len(a) != 2
+                    or len(b) != 2
+                    or a[1] != b[0]
+                    or any(
+                        isinstance(v, bool) or not isinstance(v, int) or v <= 0
+                        for v in (*a, *b)
+                    )
+                ):
+                    raise ValueError("Invalid source dot geometry")
+                work = a[0] * a[1] * b[1]
+                if work % threads:
+                    raise ValueError("Partial scalar expansion")
+                programs[program] = programs.get(program, 0) + work // threads
+    else:
+        plan = conditional_mma_work(
+            regions,
+            precision=row["source_precision"],
+            warps=threads // 32,
+            compiler_version=row["compiler_version"],
+        )
+        programs = {
+            tuple(p["program"]): p["instructions_per_warp"] for p in plan["programs"]
+        }
+    if not programs or len(programs) != count or len(set(programs.values())) != 1:
+        raise ValueError("Require complete uniform source program work")
+    if regions["dot_count"] / count != row["source_features"]["dots_per_program"]:
+        raise ValueError("Source dot observation count mismatch")
+    value = next(iter(programs.values()))
     if not math.isfinite(value) or value <= 0:
         raise ValueError("Invalid source dot instruction scale")
     return value
@@ -83,6 +150,11 @@ def _predict(training, source, labels):
         instructions_per_warp=predicted,
         neighbors=[r["case"]["id"] for r in nearest],
         ood_reasons=reasons
+        + (
+            ["instruction_region_lowering_conditional"]
+            if "source_execution" in source
+            else []
+        )
         + [
             f"instruction_domain:{k}"
             for k, (lo, hi) in domain.items()
