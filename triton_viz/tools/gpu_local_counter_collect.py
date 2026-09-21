@@ -48,11 +48,65 @@ def reusable_controls(
     suite="pressure",
     require_monitored=False,
     allowed_graphics=None,
+    cache_lookups=False,
+    issue_work=False,
 ):
     """Validate completed parent rows; preserve failed rows only in their parent."""
-    from triton_viz.tools.gpu_local_counter_audit import parse
+    if cache_lookups and issue_work:
+        raise ValueError("Declare separate counter phases")
+    if cache_lookups or issue_work:
+        from triton_viz.tools.gpu_dot_cache_counter_audit import (
+            parse as parse_cache,
+            parse_issue,
+        )
+
+        parse_counter = (
+            (lambda text: parse_issue(text, retain_invalid_stalls=True))
+            if issue_work
+            else parse_cache
+        )
+    else:
+        from triton_viz.tools.gpu_local_counter_audit import parse as parse_counter
+    expected_metrics = (
+        ISSUE_METRICS if issue_work else CACHE_METRICS if cache_lookups else METRICS
+    )
 
     manifest = json.loads((root / "manifest.json").read_text())
+    if (cache_lookups and manifest.get("cache_lookup_phase") is not True) or (
+        issue_work and manifest.get("issue_work_phase") is not True
+    ):
+        raise ValueError("Cannot resume a different counter phase")
+    if cache_lookups or issue_work:
+        declared = manifest.get("commands", [])
+        expected_ids = {c["id"] for c in selected_controls(suite)}
+        try:
+            actual_ids = [c[c.index("--case-id") + 1] for c in declared]
+            valid = all(
+                all(
+                    c[c.index(flag) + 1] == value
+                    for flag, value in (
+                        ("--metrics", ",".join(expected_metrics)),
+                        ("--cache-control", "all"),
+                        ("--clock-control", "none"),
+                        ("--replay-mode", "kernel"),
+                        ("--profile-from-start", "off"),
+                        ("--suite", suite),
+                        ("-m", "triton_viz.tools.gpu_control_counter_probe"),
+                    )
+                )
+                for c in declared
+            )
+        except (ValueError, IndexError):
+            valid = False
+            actual_ids = []
+        if (
+            not valid
+            or len(actual_ids) != len(expected_ids)
+            or set(actual_ids) != expected_ids
+        ):
+            raise ValueError(
+                "Cannot resume a different control counter command protocol"
+            )
     if require_monitored and (
         manifest.get("monitored") is not True
         or (
@@ -68,7 +122,7 @@ def reusable_controls(
         for k, v in {
             "role": "control",
             "cases": selected_controls(suite),
-            "metrics": list(METRICS),
+            "metrics": list(expected_metrics),
             "hardware": hardware,
             "probe_sha256": probe_sha256,
             "ncu_version": ncu_version,
@@ -84,7 +138,7 @@ def reusable_controls(
 
                 validate_monitor(path, manifest)
             text, log = path.read_text(), path.with_suffix(".log").read_text()
-            parse(text)
+            parse_counter(text)
             if (
                 f"control={case['id']} numerical=passed profiler_timing_not_for_fit"
                 not in log
@@ -171,8 +225,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require a fresh control output directory")
-    if (args.cache_lookups or args.issue_work) and args.resume_from is not None:
-        raise ValueError("Additional counter phases require fresh complete collection")
     if (
         args.monitor
         and args.resume_from is not None
@@ -211,6 +263,8 @@ def main(argv=None):
             probe_sha256=probe_sha256,
             ncu_version=version,
             suite=args.suite,
+            cache_lookups=args.cache_lookups,
+            issue_work=args.issue_work,
             require_monitored=args.monitor,
             allowed_graphics=[p["pid"] for p in baseline["graphics_processes"]]
             if args.allow_idle_graphics

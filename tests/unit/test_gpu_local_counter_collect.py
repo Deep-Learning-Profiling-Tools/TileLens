@@ -121,3 +121,73 @@ def test_resume_reuses_only_complete_matching_control_rows(tmp_path):
     assert not reusable_controls(tmp_path, **kwargs)
     with pytest.raises(ValueError, match="different control"):
         reusable_controls(tmp_path, **{**kwargs, "probe_sha256": "changed"})
+
+
+def test_issue_resume_retains_raw_ratios_but_never_reuses_failed_monitor(tmp_path):
+    from triton_viz.tools.gpu_local_counter_collect import ISSUE_METRICS
+
+    cases = selected_controls("pressure")
+    hardware = dict(uuid="gpu", driver="driver", index=0)
+    manifest = dict(
+        role="control",
+        cases=cases,
+        metrics=list(ISSUE_METRICS),
+        hardware=hardware,
+        probe_sha256="probe",
+        ncu_version="ncu",
+        monitored=True,
+        allowed_graphics=[],
+        issue_work_phase=True,
+        commands=commands("ncu", tmp_path, issue_work=True),
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    path = tmp_path / (cases[0]["id"] + ".csv")
+    path.write_text(
+        "\n".join(
+            ['"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"']
+            + [
+                f'"0","geometry_dot","{name}","{unit}","{value}"'
+                for name, unit, value in zip(
+                    ISSUE_METRICS,
+                    ["inst"] * 4 + ["%"] * 4,
+                    [0, 0, 100, 100, 107.14, 0, 0, 0],
+                )
+            ]
+        )
+    )
+    path.with_suffix(".log").write_text(
+        f"control={cases[0]['id']} numerical=passed profiler_timing_not_for_fit"
+    )
+    record = dict(
+        case_id=cases[0]["id"],
+        csv_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        log_sha256=hashlib.sha256(path.with_suffix(".log").read_bytes()).hexdigest(),
+        monitoring=dict(
+            returncode=0,
+            contaminated=False,
+            rejection_reasons=[],
+            child_pid=10,
+            own_process_group=True,
+            samples=[dict(**hardware, processes=[], graphics_processes=[])] * 2,
+        ),
+    )
+    path.with_suffix(".monitor.json").write_text(json.dumps(record))
+    args = dict(
+        hardware=hardware,
+        probe_sha256="probe",
+        ncu_version="ncu",
+        require_monitored=True,
+        allowed_graphics=[],
+        issue_work=True,
+    )
+    assert set(reusable_controls(tmp_path, **args)) == {cases[0]["id"]}
+    with pytest.raises(ValueError, match="different control"):
+        reusable_controls(tmp_path, **{**args, "issue_work": False})
+    record["monitoring"]["contaminated"] = True
+    path.with_suffix(".monitor.json").write_text(json.dumps(record))
+    assert not reusable_controls(tmp_path, **args)
+    command = manifest["commands"][0]
+    command[command.index("--cache-control") + 1] = "none"
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="command protocol"):
+        reusable_controls(tmp_path, **args)
