@@ -22,9 +22,9 @@ shfl.sync.bfly.b32 %r0, %r1, 1, 31, -1;
 """
     labels = reduction_instruction_labels(ptx)
     assert labels == dict(
-        max=dict(shuffles=1, barriers=1),
-        sum=dict(shuffles=1, barriers=0),
-        other=dict(shuffles=1, barriers=0),
+        max=dict(shuffles=1, barriers=1, leading_barriers=1),
+        sum=dict(shuffles=1, barriers=0, leading_barriers=0),
+        other=dict(shuffles=1, barriers=0, leading_barriers=0),
     )
     with pytest.raises(ValueError, match="locations"):
         reduction_instruction_labels(ptx.replace(".loc 2 293 36", ".loc 2 999 36"))

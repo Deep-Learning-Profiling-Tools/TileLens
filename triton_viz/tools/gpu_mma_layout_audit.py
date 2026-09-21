@@ -20,7 +20,11 @@ def reduction_instruction_labels(ptx):
         int(index): Path(path).name
         for index, path in re.findall(r'\.file\s+(\d+)\s+"([^"]+)"', ptx)
     }
-    counts = {op: dict(shuffles=0, barriers=0) for op in ("max", "sum", "other")}
+    counts = {
+        op: dict(shuffles=0, barriers=0, leading_barriers=0)
+        for op in ("max", "sum", "other")
+    }
+    shared_store_seen = set()
     locations = {191: "max", 293: "sum"}  # Triton 3.7 standard.py
     active = "other"
     seen = set()
@@ -37,8 +41,12 @@ def reduction_instruction_labels(ptx):
             seen.add(active)
         if re.search(r"\bshfl\.sync\.", line):
             counts[active]["shuffles"] += 1
+        if re.search(r"\bst\.shared\.", line):
+            shared_store_seen.add(active)
         if re.search(r"\bbar\.sync\s", line):
             counts[active]["barriers"] += 1
+            if active not in shared_store_seen:
+                counts[active]["leading_barriers"] += 1
     if not {"max", "sum"} <= seen:
         raise ValueError("Missing pinned control reduction locations")
     return counts
@@ -189,7 +197,7 @@ def audit(resource_root, source_root):
                     for op in ("max", "sum")
                 ),
                 exact_reduction_match=all(
-                    labels[op]
+                    {k: labels[op][k] for k in ("shuffles", "barriers")}
                     == dict(
                         shuffles=reduction["total_shuffles"],
                         barriers=reduction["reduction_barriers"],
