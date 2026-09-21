@@ -13,6 +13,68 @@ import math
 from itertools import product
 
 
+def cyclic_local_cache_hypothesis(
+    *,
+    actors,
+    slots,
+    blocks_per_slot,
+    iterations,
+    capacity_blocks,
+    associativity,
+    method="exact",
+):
+    """Closed-form SDCM for a declared round-robin local-array access schedule.
+
+    Each slot has disjoint blocks per actor. Initialize all slots by stores;
+    cyclically load then store one slot per actor; finish with one read of all
+    slots. Actors interleave at whole-slot boundaries in every phase. Iterations
+    must contain complete slot cycles. Residency, per-warp issue order, hardware
+    allocation, write policy and cache parameters still need control validation.
+    This is not a spill predictor or a calibrated local-memory cache model.
+    """
+    if any(
+        isinstance(x, bool) or not isinstance(x, int) or x < 1
+        for x in (actors, slots, blocks_per_slot, iterations)
+    ):
+        raise ValueError("Require positive integral cyclic schedule dimensions")
+    if iterations % slots:
+        raise ValueError("Partial cycles require explicit boundary accounting")
+    footprint = actors * slots * blocks_per_slot
+    load_distance, store_distance = footprint - 1, blocks_per_slot - 1
+    load_hit = sdcm_hit_probability(
+        load_distance,
+        capacity_blocks=capacity_blocks,
+        associativity=associativity,
+        method=method,
+    )
+    store_hit = sdcm_hit_probability(
+        store_distance,
+        capacity_blocks=capacity_blocks,
+        associativity=associativity,
+        method=method,
+    )
+    load_requests = actors * blocks_per_slot * (iterations + slots)
+    repeated_stores = actors * blocks_per_slot * iterations
+    return dict(
+        footprint_blocks=footprint,
+        load_reuse_distance=load_distance,
+        repeated_store_reuse_distance=store_distance,
+        traffic=dict(
+            load_requests=load_requests,
+            load_hits=load_requests * load_hit,
+            load_misses=load_requests * (1 - load_hit),
+            load_cold_misses=0,
+            store_requests=footprint + repeated_stores,
+            store_hits=repeated_stores * store_hit,
+            store_misses=footprint + repeated_stores * (1 - store_hit),
+            store_cold_misses=footprint,
+        ),
+        calibrated=False,
+        schedule="slot_round_robin_all_actors",
+        policy="write_allocate_uniform_sets_lru_hypothesis",
+    )
+
+
 def source_cache_traffic(
     source, *, capacity_blocks, associativity, schedule, sm_count, method="exact"
 ):
