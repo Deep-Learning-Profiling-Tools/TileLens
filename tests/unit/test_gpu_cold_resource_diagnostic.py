@@ -1,12 +1,62 @@
 import copy
 
+import numpy as np
 import pytest
 
 from triton_viz.tools.gpu_cold_resource_diagnostic import (
     FEATURES,
     SERVICE_FEATURES,
     validate,
+    enumerated_nonnegative_fit,
+    service_model,
 )
+
+
+def test_small_nnls_handles_collinear_and_inactive_columns_without_dropping_rows():
+    x = np.array([[1, 2, 0, 1], [2, 4, 0, 1], [3, 6, 0, 1]], dtype=float)
+    y = np.array([4, 7, 10], dtype=float)
+    coefficients = enumerated_nonnegative_fit(x, y)
+    assert (coefficients >= 0).all()
+    assert np.allclose(x @ coefficients, y)
+    assert coefficients[2] == 0
+    # The unconstrained slope here is negative: NNLS must use the boundary.
+    x = np.array([[1, 1], [1, 2], [1, 3]], dtype=float)
+    y = np.array([3, 2, 1], dtype=float)
+    coefficients = enumerated_nonnegative_fit(x, y)
+    assert coefficients[1] == 0
+    assert coefficients[0] == pytest.approx(sum(1 / y) / sum(1 / y**2))
+
+
+def test_service_solver_fallback_preserves_objective_and_records_provenance(
+    monkeypatch,
+):
+    from triton_viz.tools import gpu_cold_resource_diagnostic as diagnostic
+
+    def fail(*_):
+        raise ValueError("Nonnegative calibration did not converge")
+
+    monkeypatch.setattr(diagnostic, "_nonnegative_fit", fail)
+    rows = [dict(features={"a": i, "b": 2 * i}, latency_us=3 * i) for i in (1, 2, 3)]
+    model = service_model(rows, ("a", "b"))
+    assert model["solver"] == "enumerated_faces_svd"
+    assert sum(model["coefficients"] * np.array([1, 2])) == pytest.approx(3)
+
+
+def test_enumerated_solver_satisfies_nonnegative_optimality_conditions():
+    rng = np.random.default_rng(20260921)
+    for _ in range(12):
+        x = rng.uniform(size=(20, 5)) * np.array([1, 1e-9, 1e9, 1, 1])
+        x[:, 4] = x[:, 3]  # Non-unique coefficients must not break predictions.
+        y = rng.uniform(1, 10, size=20)
+        coefficients = enumerated_nonnegative_fit(x, y)
+        weighted = x / y[:, None]
+        scale = np.linalg.norm(weighted, axis=0)
+        a = weighted / scale
+        c = coefficients * scale
+        gradient = a.T @ (a @ c - 1)
+        assert (c >= 0).all()
+        assert gradient.min() >= -1e-10
+        assert np.max(np.abs(c * gradient)) < 1e-10
 
 
 def fixture():

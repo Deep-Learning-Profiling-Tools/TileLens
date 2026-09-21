@@ -7,6 +7,7 @@ folds. No admission flags change and no production calibration is emitted.
 """
 
 import math
+from itertools import combinations
 
 import numpy as np
 
@@ -26,6 +27,49 @@ SERVICE_FEATURES = (
     "shuffle_steps",
 ) + WAVE_DOT_FEATURES
 DEMAND = "predicted_local_allocation_dot_demand"
+
+
+def enumerated_nonnegative_fit(x, y):
+    """Small diagnostic NNLS fallback with the identical relative-error objective.
+
+    Enumerate faces of the nonnegative orthant, solving each with NumPy SVD.
+    At least one optimal NNLS solution has a linearly independent positive
+    support, so dependent columns need not converge by coordinate updates.
+    This exponential fallback is deliberately limited to our small service
+    vectors, not installed as a general production calibration solver.
+    """
+    if x.ndim != 2 or x.shape[0] != len(y) or x.shape[1] > 12:
+        raise ValueError("Require a small diagnostic service matrix")
+    if (
+        not len(y)
+        or not np.isfinite(x).all()
+        or not np.isfinite(y).all()
+        or (x < 0).any()
+        or (y <= 0).any()
+    ):
+        raise ValueError("Invalid diagnostic service matrix")
+    weighted = x / y[:, None]
+    scale = np.linalg.norm(weighted, axis=0)
+    scale[scale == 0] = 1
+    a = weighted / scale
+    active = np.flatnonzero(np.any(a != 0, axis=0))
+    best = np.zeros(x.shape[1])
+    cost = float(len(y))
+    for count in range(1, len(active) + 1):
+        for support in combinations(active, count):
+            indices = list(support)
+            trial, _, rank, _ = np.linalg.lstsq(
+                a[:, indices], np.ones(len(y)), rcond=None
+            )
+            if rank < count or (trial < 0).any():
+                continue
+            residual = a[:, indices] @ trial - 1
+            loss = float(residual @ residual)
+            if loss < cost:
+                best = np.zeros(x.shape[1])
+                best[indices] = trial
+                cost = loss
+    return best / scale
 
 
 def allocation_dot_demand(source_features, waves, allocation_bytes):
@@ -56,9 +100,18 @@ def service_model(training, keys):
         or (y <= 0).any()
     ):
         raise ValueError("Invalid diagnostic service data")
+    solver = "coordinate_descent"
+    try:
+        coefficients = _nonnegative_fit(x, y)
+    except ValueError as error:
+        if str(error) != "Nonnegative calibration did not converge":
+            raise
+        coefficients = enumerated_nonnegative_fit(x, y)
+        solver = "enumerated_faces_svd"
     return dict(
         keys=list(keys),
-        coefficients=_nonnegative_fit(x, y).tolist(),
+        coefficients=coefficients.tolist(),
+        solver=solver,
         domain={
             k: [float(x[:, i].min()), float(x[:, i].max())] for i, k in enumerate(keys)
         },
