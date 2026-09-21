@@ -26,6 +26,13 @@ def test_declared_matrix_has_balanced_order_without_adaptive_trials():
         assert a["mode"] == ("none" if a["trial"] % 2 == 0 else "software_serial")
 
 
+def test_new_workloads_have_disjoint_explicit_trial_identities():
+    groups = [collect.declared_trials(kind) for kind in ("fma", "tensor", "local")]
+    assert len({case["id"] for group in groups for case in group}) == 144
+    for kind, cases in zip(("tensor", "local"), groups[1:]):
+        assert all(case["workload"] == kind for case in cases)
+
+
 def test_foreign_baseline_prevents_child_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(collect, "snapshot", lambda _: snapshot([1234]))
     monkeypatch.setattr(

@@ -13,7 +13,8 @@ def audit_root(root):
     from triton_viz.tools.gpu_cupti_perturbation_collect import declared_trials
 
     manifest = json.loads((root / "manifest.json").read_text())
-    cases = declared_trials()
+    workload = manifest.get("workload", "fma")
+    cases = declared_trials(workload)
     if (
         manifest.get("role") != "control"
         or manifest.get("eligible_for_fit") is not False
@@ -58,6 +59,7 @@ def audit_root(root):
             mode=case["mode"],
             programs=case["programs"],
             iterations=case["iterations"],
+            workload=workload,
         )
         if audited != row["audit"]:
             raise ValueError("Stored summary differs from raw intervals")
@@ -112,7 +114,9 @@ def audit_root(root):
     )
 
 
-def audit_log(text, *, mode, programs, iterations):
+def audit_log(text, *, mode, programs, iterations, workload="fma"):
+    if workload not in {"fma", "tensor", "local"}:
+        raise ValueError("Unknown perturbation workload")
     if (
         mode not in {"none", "software_serial"}
         or programs not in (48, 96, 384)
@@ -188,6 +192,8 @@ def audit_log(text, *, mode, programs, iterations):
         valid="1",
         close_status="0",
     )
+    if workload != "fma" or "workload" in metadata:
+        expected["workload"] = workload
     if any(metadata.get(k) != v for k, v in expected.items()):
         raise ValueError("Unverified identity, numerical result or completion")
     allowed = set(expected) | {

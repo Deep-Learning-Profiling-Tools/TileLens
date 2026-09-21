@@ -76,6 +76,21 @@ def log(mode="software_serial"):
     return "\n".join(lines)
 
 
+@pytest.mark.parametrize("workload", ["tensor", "local"])
+def test_workload_identity_cannot_be_silently_relabelled(workload):
+    raw = log() + f"\nworkload={workload}"
+    result = audit_log(
+        raw, mode="software_serial", programs=48, iterations=16, workload=workload
+    )
+    assert result["metadata"]["workload"] == workload
+    with pytest.raises(ValueError, match="identity"):
+        audit_log(raw, mode="software_serial", programs=48, iterations=16)
+    with pytest.raises(ValueError, match="identity"):
+        audit_log(
+            log(), mode="software_serial", programs=48, iterations=16, workload=workload
+        )
+
+
 @pytest.mark.parametrize("mode", ["none", "software_serial"])
 def test_retains_all_groups_and_separates_clock_domains(mode):
     result = audit_log(log(mode), mode=mode, programs=48, iterations=16)

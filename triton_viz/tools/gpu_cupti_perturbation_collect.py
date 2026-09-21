@@ -11,8 +11,10 @@ from triton_viz.tools.gpu_cost_model_pipeline import _write
 from triton_viz.tools.gpu_cupti_perturbation_audit import audit_log
 
 
-def declared_trials():
-    return [
+def declared_trials(workload="fma"):
+    if workload not in {"fma", "tensor", "local"}:
+        raise ValueError("Unknown perturbation workload")
+    trials = [
         dict(
             id=f"p{programs}_i{iterations}_t{trial}_{mode}",
             programs=programs,
@@ -29,6 +31,10 @@ def declared_trials():
             else ("software_serial", "none")
         )
     ]
+    if workload != "fma":
+        for trial in trials:
+            trial.update(id=workload + "_" + trial["id"], workload=workload)
+    return trials
 
 
 def monitored_process(command, log, *, allowed_graphics=(), timeout=180):
@@ -105,6 +111,7 @@ def main(argv=None):
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
+    parser.add_argument("--workload", choices=("fma", "tensor", "local"), default="fma")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require fresh diagnostic output root")
@@ -127,13 +134,14 @@ def main(argv=None):
         "auditor": Path(__file__).with_name("gpu_cupti_perturbation_audit.py"),
     }
     hashes = {k: hashlib.sha256(p.read_bytes()).hexdigest() for k, p in paths.items()}
-    trials = declared_trials()
+    trials = declared_trials(args.workload)
     _write(
         args.output / "manifest.json",
         dict(
             role="control",
             eligible_for_fit=False,
             trials=trials,
+            workload=args.workload,
             hashes=hashes,
             baseline=baseline,
             allowed_graphics=graphics,
@@ -172,6 +180,7 @@ def main(argv=None):
                 mode=case["mode"],
                 programs=case["programs"],
                 iterations=case["iterations"],
+                workload=args.workload,
             )
             observed_hardware = {
                 k: int(result["audit"]["metadata"][k]) for k in ("l2_bytes", "sm_count")

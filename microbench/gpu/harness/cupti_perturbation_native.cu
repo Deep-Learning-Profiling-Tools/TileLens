@@ -12,6 +12,19 @@
 #include <cstring>
 #include <cmath>
 
+#ifndef TV_PERTURBATION_WORKLOAD
+#define TV_PERTURBATION_WORKLOAD 0
+#endif
+#if TV_PERTURBATION_WORKLOAD == 0
+static const char *workload = "fma";
+#elif TV_PERTURBATION_WORKLOAD == 1
+static const char *workload = "tensor";
+#elif TV_PERTURBATION_WORKLOAD == 2
+static const char *workload = "local";
+#else
+#error Unknown perturbation workload
+#endif
+
 struct Timestamp {
   uint64_t start_ns, end_ns;
   uint32_t device, context, stream, correlation;
@@ -34,9 +47,31 @@ __global__ void perturbation_body(float *output, BodyInterval *intervals,
   if (threadIdx.x == 0) asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(start) :: "memory");
   __syncthreads();
   float value = 1.0f + threadIdx.x;
+#if TV_PERTURBATION_WORKLOAD == 0
   for (int i = 0; i < iterations; ++i)
     asm volatile("fma.rn.f32 %0, %0, %1, %2;"
                  : "+f"(value) : "f"(0.999999f), "f"(0.000001f));
+#elif TV_PERTURBATION_WORKLOAD == 1
+  float c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+  const unsigned ones = 0x3c003c00;  // two exactly represented FP16 ones
+  for (int i = 0; i < iterations; ++i)
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                 "{%0,%1,%2,%3}, {%4,%4,%4,%4}, {%4,%4}, {%0,%1,%2,%3};"
+                 : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3) : "r"(ones));
+  value = c0 + c1 + c2 + c3;
+#else
+  // Deliberate local-memory traffic, not a claim about compiler-inferred spills.
+  volatile float local_values[128];
+  for (int j = 0; j < 128; ++j) local_values[j] = value;
+  for (int i = 0; i < iterations; ++i) {
+    float x = local_values[i & 127];
+    asm volatile("fma.rn.f32 %0, %0, %1, %2;"
+                 : "+f"(x) : "f"(0.999999f), "f"(0.000001f));
+    local_values[i & 127] = x;
+  }
+  value = 0;
+  for (int j = 0; j < 128; ++j) value += local_values[j];
+#endif
   output[blockIdx.x * blockDim.x + threadIdx.x] = value;
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -74,6 +109,7 @@ int main(int argc, char **argv) {
   }
   std::printf("role=control,eligible_for_fit=false,mode=%s,programs=%d,iterations=%d\n",
               argv[1], programs, iterations);
+  std::printf("workload=%s\n", workload);
   auto drain = [&](int sample) {
     if (!enabled) return true;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -151,7 +187,17 @@ int main(int argc, char **argv) {
   check(cudaMemcpy(values.data(), output, values.size() * sizeof(float), cudaMemcpyDeviceToHost));
   for (int t = 0; t < 128; ++t) {
     float x = 1.0f + t;
+#if TV_PERTURBATION_WORKLOAD == 0
     for (int i = 0; i < iterations; ++i) x = std::fma(x, 0.999999f, 0.000001f);
+#elif TV_PERTURBATION_WORKLOAD == 1
+    x = float(64 * iterations);
+#else
+    float slots[128];
+    for (int j = 0; j < 128; ++j) slots[j] = x;
+    for (int i = 0; i < iterations; ++i) slots[i & 127] = std::fma(slots[i & 127], 0.999999f, 0.000001f);
+    x = 0;
+    for (int j = 0; j < 128; ++j) x += slots[j];
+#endif
     reference[t] = x;
   }
   for (size_t i = 0; i < values.size(); ++i) valid &= values[i] == reference[i % 128];
