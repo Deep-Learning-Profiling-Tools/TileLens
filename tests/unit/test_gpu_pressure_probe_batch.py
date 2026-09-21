@@ -90,3 +90,28 @@ def test_pressure_batch_timeout_retains_three_attempt_logs(tmp_path, monkeypatch
     assert len(logs) == 3
     assert all("timed out" in log.read_text() for log in logs)
     assert not (output / "controls").exists()
+
+
+def test_monitored_batch_rejects_missing_monitoring(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "load_cases", lambda *_: [{"id": "declared"}])
+
+    def run(command, **kwargs):
+        assert "--monitored" in command and "--capture-cache" in command
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(dict(unstable=False, median_us=1, relative_span=0))
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(batch.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="after 3 batches"):
+        batch.main(
+            [
+                "--library",
+                "unused",
+                "--output",
+                str(tmp_path / "batch"),
+                "--monitored",
+                "--capture-cache",
+            ]
+        )

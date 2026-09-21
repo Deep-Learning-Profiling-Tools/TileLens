@@ -14,8 +14,12 @@ import math
 import time
 from pathlib import Path
 
-from microbench.gpu.harness.cupti import CuptiTimestamps, validate_timestamps
-from microbench.gpu.harness.measure import assert_available, snapshot
+from microbench.gpu.harness.cupti import (
+    CuptiTimestamps,
+    validate_timestamps,
+    group_kernel_intervals,
+)
+from microbench.gpu.harness.measure import assert_available, snapshot, monitor_call
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
@@ -24,8 +28,36 @@ def main(argv=None):
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
-    parser.add_argument("--suite", choices=("coverage", "pressure"), default="coverage")
+    parser.add_argument(
+        "--suite",
+        choices=(
+            "coverage",
+            "pressure",
+            "resource_transfer",
+            "geometry",
+            "structure",
+            "stability",
+        ),
+        default="coverage",
+    )
+    parser.add_argument(
+        "--monitored",
+        action="store_true",
+        help="Retain continuous NVML process monitoring around the measured graph batch",
+    )
     parser.add_argument("--warmup-seconds", type=float, default=0.5)
+    parser.add_argument("--kernels-per-sample", type=int, default=1)
+    parser.add_argument(
+        "--graph-pairs-per-replay",
+        type=int,
+        help="Bound graph size and drain every replay; separate diagnostic protocol",
+    )
+    parser.add_argument("--delivery-timeout-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--capture-cache",
+        action="store_true",
+        help="Retain anonymous source-sector accesses for control-only cache modeling",
+    )
     parser.add_argument(
         "--graph-samples",
         action="store_true",
@@ -44,6 +76,18 @@ def main(argv=None):
         raise ValueError("Warmup duration must be finite and nonnegative")
     if args.output.exists():
         raise ValueError("Use a fresh probe output; do not overwrite attempts")
+    if args.monitored and not args.graph_samples:
+        raise ValueError("Monitored collection requires graph eviction/control pairs")
+    if args.kernels_per_sample < 1 or (
+        args.kernels_per_sample != 1 and not args.graph_samples
+    ):
+        raise ValueError("Replicated samples require a graph and a positive count")
+    if args.graph_pairs_per_replay is not None and (
+        not args.graph_samples
+        or args.graph_pairs_per_replay < 1
+        or (11 * args.kernels_per_sample) % args.graph_pairs_per_replay
+    ):
+        raise ValueError("Graph chunk must divide the full declared launch count")
     baseline = snapshot(0)
     graphics = (
         tuple(p["pid"] for p in baseline["graphics_processes"])
@@ -51,8 +95,38 @@ def main(argv=None):
         else ()
     )
     assert_available(baseline, allowed_graphics=graphics)
-    collector = CuptiTimestamps(args.library)  # Before any CUDA context.
+    collector = CuptiTimestamps(
+        args.library, delivery_timeout_seconds=args.delivery_timeout_seconds
+    )  # Before any CUDA context.
+    try:
+        return _run_probe(args, baseline, graphics, collector)
+    except Exception as error:
+        failure = dict(role="control", eligible_for_fit=False, failed=str(error))
+        try:
+            failure["records"] = collector.read()
+        except Exception as delivery_error:
+            failure["record_delivery_error"] = str(delivery_error)
+        failure_path = args.output.with_suffix(".failure.json")
+        if not failure_path.exists():
+            _write(failure_path, failure)
+        raise
+    finally:
+        collector.close()
+        failure_path = args.output.with_suffix(".failure.json")
+        teardown_path = args.output.with_suffix(".teardown.json")
+        if failure_path.exists() and not teardown_path.exists():
+            _write(
+                teardown_path,
+                dict(
+                    role="control",
+                    eligible_for_fit=False,
+                    diagnostic="post-finalize forced delivery; may contain incomplete records",
+                    records=collector.snapshot(),
+                ),
+            )
 
+
+def _run_probe(args, baseline, graphics, collector):
     import os
     import torch
     import triton_viz
@@ -75,7 +149,7 @@ def main(argv=None):
         key: case.get(key, default)
         for key, default in (("num_warps", 4), ("num_stages", 2))
     }
-    source = observe(kernel, grid, *inputs, **options)
+    source = observe(kernel, grid, *inputs, capture_cache=args.capture_cache, **options)
     check_output(case, out)
     triton_viz.clear()
     driver = ctypes.CDLL("libcuda.so.1")
@@ -133,11 +207,15 @@ def main(argv=None):
         collector.clear()
         warmup_launches += 1
     samples = []
+    monitoring = None
     telemetry = [baseline]
     if args.graph_samples:
+        launches = 11 * args.kernels_per_sample
+        pairs_per_replay = args.graph_pairs_per_replay or launches
+        expected_nodes = 2 * pairs_per_replay
         graph = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(graph):
-            for _ in range(11):
+            for _ in range(pairs_per_replay):
                 sweep.zero_()
                 launch()
         handle = ctypes.c_void_p(graph.raw_cuda_graph())
@@ -153,9 +231,9 @@ def main(argv=None):
             if driver.cuGraphNodeGetType(ctypes.c_void_p(node), ctypes.byref(kind)):
                 raise RuntimeError("Cannot inspect graph node kind")
             graph_kernel_nodes += kind.value == 0  # CU_GRAPH_NODE_TYPE_KERNEL
-        if graph_kernel_nodes != 22:
+        if graph_kernel_nodes != expected_nodes:
             raise RuntimeError(
-                f"Expected 22 captured kernel nodes, got {graph_kernel_nodes}"
+                f"Expected {expected_nodes} captured kernel nodes, got {graph_kernel_nodes}"
             )
         if args.graph_debug:
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +244,7 @@ def main(argv=None):
         graph.instantiate()
         graph.replay()
         torch.cuda.synchronize()
-        collector.read(expected_count=22)
+        collector.read(expected_count=expected_nodes)
         collector.clear()
         # Warm the same device-side sequence we measure. Individual Python
         # launches can leave the GPU mostly idle despite a long wall-time warmup.
@@ -175,17 +253,37 @@ def main(argv=None):
         while time.monotonic() < graph_deadline:
             graph.replay()
             torch.cuda.synchronize()
-            collector.read(expected_count=22)
+            collector.read(expected_count=expected_nodes)
             collector.clear()
             graph_warmup_replays += 1
         sample = snapshot(0)
         assert_available(sample, own_pid=os.getpid(), allowed_graphics=graphics)
         telemetry.append(sample)
-        graph.replay()
-        torch.cuda.synchronize()
-        raw = collector.read(expected_count=22)
+
+        def measured_graph():
+            result = []
+            for _ in range(launches // pairs_per_replay):
+                collector.clear()
+                graph.replay()
+                torch.cuda.synchronize()
+                batch = collector.read(expected_count=expected_nodes)
+                # Validate before clearing: surplus or cross-replay records
+                # must never disappear when collecting the next chunk.
+                result.extend(
+                    validate_timestamps(
+                        batch, expected_names=names * pairs_per_replay, device=0
+                    )
+                )
+            return result
+
+        if args.monitored:
+            raw, monitoring = monitor_call(measured_graph, allowed_graphics=graphics)
+        else:
+            raw = measured_graph()
         try:
-            records = validate_timestamps(raw, expected_names=names * 11, device=0)
+            records = validate_timestamps(
+                raw, expected_names=names * launches, device=0
+            )
         except ValueError:
             _write(
                 args.output,
@@ -195,18 +293,13 @@ def main(argv=None):
                     eligible_for_fit=False,
                     failed="invalid_graph_records",
                     records=raw,
-                    expected_names=names * 11,
+                    expected_names=names * launches,
                 ),
             )
             raise
-        for index in range(11):
-            pair = records[2 * index : 2 * index + 2]
-            samples.append(
-                dict(
-                    records=pair,
-                    latency_us=(pair[1]["end_ns"] - pair[1]["start_ns"]) / 1000,
-                )
-            )
+        samples = group_kernel_intervals(
+            records, kernels_per_sample=args.kernels_per_sample
+        )
     for _ in range(0 if args.graph_samples else 11):
         sample = snapshot(0)
         assert_available(sample, own_pid=os.getpid(), allowed_graphics=graphics)
@@ -238,18 +331,27 @@ def main(argv=None):
             case=case,
             source=source,
             samples=samples,
+            kernels_per_sample=args.kernels_per_sample,
+            delivery_timeout_seconds=args.delivery_timeout_seconds,
             telemetry=telemetry,
+            monitoring=monitoring,
+            contaminated=monitoring["contaminated"] if monitoring else None,
             median_us=median,
             relative_span=relative_span,
             unstable=relative_span > 0.15,
             warmup_seconds=args.warmup_seconds,
             warmup_launches=warmup_launches,
-            launch_mode="graph_eviction_control_pairs"
+            launch_mode="chunked_graph_eviction_control_pairs"
+            if args.graph_pairs_per_replay is not None
+            else "graph_eviction_control_pairs"
             if args.graph_samples
             else "individual_launches",
             graph_warmup_replays=graph_warmup_replays if args.graph_samples else 0,
             graph_kernel_nodes=graph_kernel_nodes if args.graph_samples else None,
-            metric="cupti_hes_kernel_us_eviction_unvalidated",
+            graph_pairs_per_replay=args.graph_pairs_per_replay,
+            metric="cupti_hes_kernel_us_eviction_unvalidated"
+            if args.kernels_per_sample == 1
+            else "cupti_hes_group_mean_kernel_us_eviction_unvalidated",
             l2_capacity_bytes=l2_bytes.value,
             eviction_bytes=sweep_bytes,
             cache_counter_validation="pending",

@@ -78,6 +78,56 @@ def assert_available(sample, *, own_pid=None, allowed_graphics=()):
             raise BusyGPU(f"GPU baseline is active ({utilization}%)")
 
 
+def monitor_call(fn, *, device=0, allowed_graphics=()):
+    """Monitor a device-synchronized call without adding any timing events.
+
+    The callable owns synchronization and timestamps. NVML sampling cannot
+    guarantee exclusive use between samples; shared-desktop status is explicit.
+    Return errors with the result so callers can retain rejected raw batches.
+    """
+    telemetry, errors = [], []
+    stop, ready = threading.Event(), threading.Event()
+
+    def sample():
+        try:
+            item = snapshot(device)
+            telemetry.append(item)
+            assert_available(
+                item, own_pid=os.getpid(), allowed_graphics=allowed_graphics
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+
+    def monitor():
+        while not stop.is_set():
+            sample()
+            ready.set()
+            stop.wait(0.1)
+
+    thread = threading.Thread(target=monitor, daemon=True)
+    thread.start()
+    try:
+        if not ready.wait(timeout=5):
+            raise BusyGPU("Monitoring failed to initialize")
+        if errors:
+            raise BusyGPU("Monitoring rejected launch: " + "; ".join(errors))
+        result = fn()
+    finally:
+        stop.set()
+        thread.join(timeout=25)
+    sample()
+    if not telemetry or thread.is_alive():
+        errors.append("incomplete_monitoring")
+    return result, dict(
+        samples=telemetry,
+        rejection_reasons=errors,
+        contaminated=bool(errors),
+        isolation="monitored_shared_desktop"
+        if allowed_graphics
+        else "monitored_no_other_processes",
+    )
+
+
 def measure(fn, *, device=0, samples=11, graph_size=1024, allowed_graphics=()):
     """Time individual kernels averaged over CUDA graph replays.
 

@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from microbench.gpu.harness.cupti import validate_timestamps
-from microbench.gpu.harness.cupti import CuptiTimestamps
+from microbench.gpu.harness.cupti import CuptiTimestamps, group_kernel_intervals
 
 
 def rows():
@@ -68,3 +68,70 @@ def test_cupti_waits_for_declared_records_not_a_favorable_duration(monkeypatch):
         collector.read(expected_count=-1)
     with pytest.raises(ValueError):
         collector.read(timeout_seconds=float("nan"))
+
+
+def test_cupti_explicit_cleanup_is_idempotent():
+    class Library:
+        closes = 0
+
+        def tv_cupti_close(self):
+            self.closes += 1
+            return 0
+
+    collector = object.__new__(CuptiTimestamps)
+    collector._lib, collector._closed = Library(), False
+    collector.close()
+    collector.close()
+    assert collector._closed and collector._lib.closes == 1
+
+
+def test_fixed_group_means_include_slow_intervals_without_filtering():
+    records = [
+        dict(start_ns=1, end_ns=2),
+        dict(start_ns=3, end_ns=1003),
+        dict(start_ns=1004, end_ns=1005),
+        dict(start_ns=1006, end_ns=1001006),
+    ]
+    samples = group_kernel_intervals(records, kernels_per_sample=2, sample_count=1)
+    assert samples[0]["records"] == records
+    assert samples[0]["kernel_latencies_us"] == [1, 1000]
+    assert samples[0]["latency_us"] == 500.5
+    with pytest.raises(ValueError):
+        group_kernel_intervals(records[:-1], kernels_per_sample=2, sample_count=1)
+
+
+@pytest.mark.parametrize("chunk", ["0", "-1", "3", "12"])
+def test_invalid_graph_chunks_rejected_before_gpu_access(tmp_path, chunk):
+    from triton_viz.tools.gpu_cupti_probe import main
+
+    with pytest.raises(ValueError, match="Graph chunk"):
+        main(
+            [
+                "--library",
+                str(tmp_path / "absent.so"),
+                "--output",
+                str(tmp_path / "probe.json"),
+                "--graph-samples",
+                "--graph-pairs-per-replay",
+                chunk,
+            ]
+        )
+
+
+def test_post_teardown_snapshot_never_flushes_or_filters_incomplete_records():
+    class Library:
+        def tv_cupti_count(self):
+            return 1
+
+        def tv_cupti_get(self, index, pointer):
+            pointer._obj.name = b"incomplete"
+            pointer._obj.start_ns = 0
+            pointer._obj.end_ns = 0
+            return 0
+
+    collector = object.__new__(CuptiTimestamps)
+    collector._lib = Library()
+    result = collector.snapshot()
+    assert len(result) == 1 and result[0]["start_ns"] == 0
+    with pytest.raises(ValueError, match="timestamps"):
+        validate_timestamps(result, expected_names=["incomplete"], device=0)

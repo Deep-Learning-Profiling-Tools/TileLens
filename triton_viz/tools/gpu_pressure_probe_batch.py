@@ -6,6 +6,8 @@ a fitter and does not authorize mixing these samples with old warm-cache data.
 """
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import subprocess
 import sys
@@ -20,18 +22,51 @@ def main(argv=None):
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
+    parser.add_argument(
+        "--suite",
+        choices=(
+            "pressure",
+            "resource_transfer",
+            "geometry",
+            "structure",
+            "stability",
+            "coverage",
+        ),
+        default="pressure",
+    )
+    parser.add_argument("--monitored", action="store_true")
+    parser.add_argument("--capture-cache", action="store_true")
+    parser.add_argument("--kernels-per-sample", type=int, default=1)
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh diagnostic root")
-    cases = load_cases("pressure", "control")
+    if args.kernels_per_sample < 1:
+        raise ValueError("A positive sample replication count is required")
+    cases = load_cases(args.suite, "control")
     _write(
         args.output / "manifest.json",
         dict(
             role="control",
+            suite=args.suite,
+            monitored=args.monitored,
+            capture_cache=args.capture_cache,
+            kernels_per_sample=args.kernels_per_sample,
+            packages={
+                name: importlib.metadata.version(name) for name in ("torch", "triton")
+            },
+            collector_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            probe_sha256=hashlib.sha256(
+                Path(__file__).with_name("gpu_cupti_probe.py").read_bytes()
+            ).hexdigest(),
+            library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest()
+            if args.library.is_file()
+            else None,
             cases=cases,
             eligible_for_fit=False,
             attempt_policy="first complete stable batch, maximum 3; retain every attempt",
-            metric="cupti_hes_kernel_us_eviction_unvalidated",
+            metric="cupti_hes_kernel_us_eviction_unvalidated"
+            if args.kernels_per_sample == 1
+            else "cupti_hes_group_mean_kernel_us_eviction_unvalidated",
         ),
     )
     for case in cases:
@@ -45,13 +80,19 @@ def main(argv=None):
             "--output",
             "",
             "--suite",
-            "pressure",
+            args.suite,
             "--case-id",
             case["id"],
             "--graph-samples",
+            "--kernels-per-sample",
+            str(args.kernels_per_sample),
         ]
         if args.allow_idle_graphics:
             command.append("--allow-idle-graphics")
+        if args.monitored:
+            command.append("--monitored")
+        if args.capture_cache:
+            command.append("--capture-cache")
         accepted = None
         for attempt in range(1, 4):
             directory = args.output / "attempts" / case["id"]
@@ -73,7 +114,11 @@ def main(argv=None):
                 print(case["id"], "failed attempt", attempt, flush=True)
                 continue
             row = json.loads(output.read_text())
-            if row.get("failed") or row["unstable"]:
+            if (
+                row.get("failed")
+                or row["unstable"]
+                or (args.monitored and row.get("contaminated") is not False)
+            ):
                 print(case["id"], "unstable/invalid attempt", attempt, flush=True)
                 continue
             accepted = {
