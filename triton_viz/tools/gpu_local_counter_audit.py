@@ -14,6 +14,44 @@ from triton_viz.tools.gpu_local_counter_collect import METRICS
 from triton_viz.tools.gpu_local_traffic_audit import account
 
 
+def validate_monitor(path, manifest):
+    record = json.loads(path.with_suffix(".monitor.json").read_text())
+    if (
+        record["case_id"] != path.stem
+        or record["csv_sha256"] != hashlib.sha256(path.read_bytes()).hexdigest()
+        or record["log_sha256"]
+        != hashlib.sha256(path.with_suffix(".log").read_bytes()).hexdigest()
+    ):
+        raise ValueError("Counter monitoring evidence hash or identity mismatch")
+    monitor = record["monitoring"]
+    if (
+        monitor["returncode"] != 0
+        or monitor["contaminated"]
+        or monitor["rejection_reasons"]
+        or monitor.get("own_process_group") is not True
+        or len(monitor["samples"]) < 2
+    ):
+        raise ValueError("Rejected or incomplete process monitoring")
+    for sample in monitor["samples"]:
+        groups = sample.get("observed_process_groups", {})
+        if (
+            any(
+                sample[k] != manifest["hardware"][k]
+                for k in ("uuid", "driver", "index")
+            )
+            or any(
+                p["pid"] != monitor["child_pid"]
+                and groups.get(str(p["pid"])) != monitor["child_pid"]
+                for p in sample["processes"]
+            )
+            or any(
+                p["pid"] not in manifest["allowed_graphics"]
+                for p in sample["graphics_processes"]
+            )
+        ):
+            raise ValueError("Foreign process or hardware identity mismatch")
+
+
 def parse(text):
     lines = text.splitlines()
     header = next((i for i, line in enumerate(lines) if line.startswith('"ID",')), None)
@@ -38,8 +76,10 @@ def parse(text):
     return dict(zip(("LDL", "STL"), (values[m] for m in METRICS)))
 
 
-def audit(counter_root, resource_root, source_root=None):
-    cases = selected_controls("pressure")
+def audit(counter_root, resource_root, source_root=None, *, suite="pressure"):
+    if suite not in {"pressure", "pressure_pipeline"}:
+        raise ValueError("Require a declared pressure control suite")
+    cases = selected_controls(suite)
     manifests = [
         json.loads((p / "manifest.json").read_text())
         for p in (counter_root, resource_root)
@@ -65,6 +105,8 @@ def audit(counter_root, resource_root, source_root=None):
         row = dict(case=case)
         path = counter_root / (case["id"] + ".csv")
         try:
+            if manifests[0].get("monitored"):
+                validate_monitor(path, manifests[0])
             text = path.read_text()
             if (
                 f"control={case['id']} numerical=passed profiler_timing_not_for_fit"
@@ -121,6 +163,9 @@ def audit(counter_root, resource_root, source_root=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--suite", choices=("pressure", "pressure_pipeline"), default="pressure"
+    )
     parser.add_argument("--counter-root", type=Path, required=True)
     parser.add_argument("--resource-root", type=Path, required=True)
     parser.add_argument("--source-root", type=Path)
@@ -128,7 +173,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Use a fresh audit output")
-    result = audit(args.counter_root, args.resource_root, args.source_root)
+    result = audit(
+        args.counter_root, args.resource_root, args.source_root, suite=args.suite
+    )
     _write(args.output, result)
     print(
         {

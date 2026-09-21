@@ -1,10 +1,51 @@
 import json
+import hashlib
 
 import pytest
 
 from triton_viz.tools.gpu_local_counter_audit import audit, parse
 from triton_viz.tools.gpu_local_counter_collect import METRICS
 from triton_viz.tools.gpu_control_resources import selected_controls
+
+
+def test_process_group_monitor_audit_checks_ownership_and_raw_hashes(tmp_path):
+    from triton_viz.tools.gpu_local_counter_audit import validate_monitor
+
+    path = tmp_path / "control.csv"
+    path.write_text("csv")
+    path.with_suffix(".log").write_text("log")
+    hardware = dict(uuid="GPU-test", driver="test", index=0)
+    manifest = dict(hardware=hardware, allowed_graphics=[])
+    record = dict(
+        case_id="control",
+        csv_sha256=hashlib.sha256(b"csv").hexdigest(),
+        log_sha256=hashlib.sha256(b"log").hexdigest(),
+        monitoring=dict(
+            returncode=0,
+            contaminated=False,
+            rejection_reasons=[],
+            own_process_group=True,
+            child_pid=10,
+            samples=[
+                dict(
+                    **hardware,
+                    processes=[dict(pid=20)],
+                    observed_process_groups={20: 10},
+                    graphics_processes=[],
+                )
+            ]
+            * 2,
+        ),
+    )
+    path.with_suffix(".monitor.json").write_text(json.dumps(record))
+    validate_monitor(path, manifest)
+    record["monitoring"]["samples"][0]["observed_process_groups"] = {20: 30}
+    path.with_suffix(".monitor.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="Foreign process"):
+        validate_monitor(path, manifest)
+    path.write_text("changed")
+    with pytest.raises(ValueError, match="hash or identity"):
+        validate_monitor(path, manifest)
 
 
 def table(values=(0, 32)):

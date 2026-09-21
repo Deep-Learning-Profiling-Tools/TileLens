@@ -10,7 +10,9 @@ from triton_viz.tools.gpu_control_resources import selected_controls
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--suite", choices=("geometry", "structure", "pressure"), required=True
+        "--suite",
+        choices=("geometry", "structure", "pressure", "pressure_pipeline"),
+        required=True,
     )
     parser.add_argument("--case-id", required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
