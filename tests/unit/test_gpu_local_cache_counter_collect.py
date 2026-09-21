@@ -7,6 +7,16 @@ from triton_viz.tools.gpu_local_cache_counter_collect import METRICS, parse_coun
 from triton_viz.tools.gpu_cupti_perturbation_collect import _owned_group_sample
 
 
+def test_footprint_grid_separates_axes_without_dropping_cases():
+    from triton_viz.tools.gpu_local_cache_counter_collect import footprint_grid
+
+    cases = footprint_grid()
+    assert len(cases) == 16
+    assert {(c["local_slots"], c["programs"]) for c in cases} == {
+        (s, p) for s in (32, 64, 128, 256) for p in (48, 96, 192, 384)
+    }
+
+
 def counters():
     buffer = io.StringIO()
     writer = csv.writer(buffer, quoting=csv.QUOTE_ALL)

@@ -5,6 +5,40 @@ import hashlib
 from triton_viz.tools.gpu_cupti_perturbation_audit import audit_log
 
 
+@pytest.mark.parametrize("slots", [32, 64, 128, 256])
+def test_counter_only_is_not_a_stable_timing_measurement(slots):
+    raw = "\n".join(
+        [
+            "role=control,eligible_for_fit=false,mode=none,programs=192,iterations=65536",
+            f"workload=local,local_slots={slots}",
+            "purpose=counter_only,measurement_samples=1",
+            "l2_bytes=1024,sm_count=48,eviction_bytes=2048,warmup_launches=0",
+            *[f"body,0,{b},{100+b},{400+b}" for b in range(192)],
+            "completed=1,valid=1,close_status=0,eligible_for_fit=false",
+        ]
+    )
+    kwargs = dict(
+        mode="none",
+        programs=192,
+        iterations=65536,
+        workload="local",
+        local_slots=slots,
+        counter_only=True,
+    )
+    result = audit_log(raw, **kwargs)
+    assert "body_envelope" not in result
+    assert result["eligible_for_fit"] is False
+    for bad in (
+        raw.replace("valid=1", "valid=0"),
+        raw.replace("warmup_launches=0", "warmup_launches=1"),
+        raw.replace(f"local_slots={slots}", "local_slots=7"),
+    ):
+        with pytest.raises(ValueError):
+            audit_log(bad, **kwargs)
+    with pytest.raises(ValueError):
+        audit_log(raw, **dict(kwargs, counter_only=False))
+
+
 def test_matrix_audit_requires_all_trials_and_checks_raw_hashes(tmp_path, monkeypatch):
     from triton_viz.tools import gpu_cupti_perturbation_audit as module
     from triton_viz.tools.gpu_cupti_perturbation_collect import declared_trials

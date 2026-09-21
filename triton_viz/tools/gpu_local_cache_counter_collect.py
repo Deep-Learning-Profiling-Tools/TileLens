@@ -1,4 +1,4 @@
-"""Profile the three declared native local-memory controls; no latency fitting."""
+"""Profile declared native local-memory controls; no latency fitting."""
 
 import argparse
 import csv
@@ -21,6 +21,15 @@ METRICS = (
     "lts__t_sectors_op_read_lookup_hit.sum",
     "lts__t_sectors_op_read_lookup_miss.sum",
 )
+
+
+def footprint_grid():
+    """Independent working-set / concurrency axes fixed before collection."""
+    return [
+        dict(local_slots=s, programs=p)
+        for s in (32, 64, 128, 256)
+        for p in (48, 96, 192, 384)
+    ]
 
 
 def parse_counters(text):
@@ -59,13 +68,35 @@ def parse_counters(text):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ncu", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, required=True)
+    binaries = parser.add_mutually_exclusive_group(required=True)
+    binaries.add_argument("--binary", type=Path)
+    binaries.add_argument(
+        "--footprint-binaries",
+        type=Path,
+        nargs=4,
+        help="Precompiled local-slot binaries in order: 32 64 128 256",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-idle-graphics", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Require fresh control counter output")
-    ncu, binary = args.ncu.resolve(strict=True), args.binary.resolve(strict=True)
+    ncu = args.ncu.resolve(strict=True)
+    grid = args.footprint_binaries is not None
+    binary_map = (
+        dict(zip((32, 64, 128, 256), args.footprint_binaries))
+        if grid
+        else {128: args.binary}
+    )
+    binary_map = {s: p.resolve(strict=True) for s, p in binary_map.items()}
+    digests = {
+        s: hashlib.sha256(p.read_bytes()).hexdigest() for s, p in binary_map.items()
+    }
+    cases = (
+        footprint_grid()
+        if grid
+        else [dict(local_slots=128, programs=p) for p in (48, 96, 384)]
+    )
     baseline = snapshot(0)
     graphics = (
         tuple(p["pid"] for p in baseline["graphics_processes"])
@@ -76,24 +107,33 @@ def main(argv=None):
     version = subprocess.run(
         [str(ncu), "--version"], check=True, capture_output=True, text=True, timeout=15
     ).stdout
-    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     _write(
         args.output / "manifest.json",
         dict(
             role="control",
             eligible_for_fit=False,
-            programs=[48, 96, 384],
+            programs=[48, 96, 192, 384] if grid else [48, 96, 384],
+            cases=cases,
+            counter_only=grid,
+            allowed_graphics=list(graphics),
             iterations=65536,
             workload="local",
             metrics=list(METRICS),
             baseline=baseline,
-            binary_sha256=digest,
+            binary_sha256=digests,
+            binaries={s: str(p) for s, p in binary_map.items()},
             ncu_version=version,
             protocol="first_body_after_eviction_kernel_replay_all_cache_no_clock_change",
         ),
     )
-    for programs in (48, 96, 384):
-        stem = f"local_p{programs}_i65536"
+    for case in cases:
+        programs, slots = case["programs"], case["local_slots"]
+        binary, digest = binary_map[slots], digests[slots]
+        stem = (
+            f"local_s{slots}_p{programs}_i65536"
+            if grid
+            else f"local_p{programs}_i65536"
+        )
         log, counters = args.output / (stem + ".log"), args.output / (stem + ".csv")
         command = [
             str(ncu),
@@ -118,8 +158,14 @@ def main(argv=None):
             str(programs),
             "65536",
         ]
+        if grid:
+            command.append("counter_only")
         result = dict(
-            role="control", eligible_for_fit=False, programs=programs, command=command
+            role="control",
+            eligible_for_fit=False,
+            programs=programs,
+            local_slots=slots,
+            command=command,
         )
         try:
             if hashlib.sha256(binary.read_bytes()).hexdigest() != digest:
@@ -145,6 +191,8 @@ def main(argv=None):
                 programs=programs,
                 iterations=65536,
                 workload="local",
+                local_slots=slots,
+                counter_only=grid,
             )
             result["counter_sha256"] = hashlib.sha256(counters.read_bytes()).hexdigest()
             result["counters"] = parse_counters(counters.read_text())

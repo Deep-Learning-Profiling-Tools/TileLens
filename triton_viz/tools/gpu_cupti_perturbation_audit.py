@@ -133,12 +133,28 @@ def audit_root(root):
     )
 
 
-def audit_log(text, *, mode, programs, iterations, workload="fma"):
+def audit_log(
+    text,
+    *,
+    mode,
+    programs,
+    iterations,
+    workload="fma",
+    local_slots=128,
+    counter_only=False,
+):
+    if local_slots not in (32, 64, 128, 256) or (
+        local_slots != 128 and workload != "local"
+    ):
+        raise ValueError("Unknown local working set")
+    if counter_only and (mode != "none" or workload != "local" or iterations != 65536):
+        raise ValueError("Counter-only protocol requires the declared local control")
+    samples = 1 if counter_only else 352
     if workload not in {"fma", "tensor", "local"}:
         raise ValueError("Unknown perturbation workload")
     if (
         mode not in {"none", "software_serial"}
-        or programs not in (48, 96, 384)
+        or programs not in ((48, 96, 192, 384) if counter_only else (48, 96, 384))
         or iterations not in (16, 65536)
     ):
         raise ValueError("Unknown declared perturbation control")
@@ -207,12 +223,18 @@ def audit_log(text, *, mode, programs, iterations, workload="fma"):
         mode=mode,
         programs=str(programs),
         iterations=str(iterations),
-        completed="352",
+        completed=str(samples),
         valid="1",
         close_status="0",
     )
     if workload != "fma" or "workload" in metadata:
         expected["workload"] = workload
+    if workload == "local" and (
+        counter_only or local_slots != 128 or "local_slots" in metadata
+    ):
+        expected["local_slots"] = str(local_slots)
+    if counter_only:
+        expected.update(purpose="counter_only", measurement_samples="1")
     if any(metadata.get(k) != v for k, v in expected.items()):
         raise ValueError("Unverified identity, numerical result or completion")
     allowed = set(expected) | {
@@ -227,9 +249,14 @@ def audit_log(text, *, mode, programs, iterations, workload="fma"):
         int(metadata[k])
         for k in ("l2_bytes", "sm_count", "eviction_bytes", "warmup_launches")
     )
-    if l2 <= 0 or sms <= 0 or eviction != 2 * l2 or warmups < 1:
+    if (
+        l2 <= 0
+        or sms <= 0
+        or eviction != 2 * l2
+        or (warmups != 0 if counter_only else warmups < 1)
+    ):
         raise ValueError("Invalid hardware or warmup/sweep provenance")
-    if pending or len(bodies) != 352 * programs:
+    if pending or len(bodies) != samples * programs:
         raise ValueError("Incomplete measurement matrix")
     cupti = []
     if mode == "software_serial":
@@ -257,6 +284,15 @@ def audit_log(text, *, mode, programs, iterations, workload="fma"):
             raise ValueError("Body sample envelopes overlap or reorder")
         previous_end = end
         envelopes.append((end - start) / 1000)
+
+    if counter_only:
+        return dict(
+            role="control",
+            eligible_for_fit=False,
+            metadata=metadata,
+            instrumented_body_envelope_us=envelopes[0],
+            caveat="Single profiler replay control; no timing stability estimate or latency admission.",
+        )
 
     def summarize(values):
         groups = [statistics.mean(values[i : i + 32]) for i in range(0, 352, 32)]

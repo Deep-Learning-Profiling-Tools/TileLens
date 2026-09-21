@@ -15,6 +15,12 @@
 #ifndef TV_PERTURBATION_WORKLOAD
 #define TV_PERTURBATION_WORKLOAD 0
 #endif
+#ifndef TV_LOCAL_SLOTS
+#define TV_LOCAL_SLOTS 128
+#endif
+#if TV_LOCAL_SLOTS != 32 && TV_LOCAL_SLOTS != 64 && TV_LOCAL_SLOTS != 128 && TV_LOCAL_SLOTS != 256
+#error Unsupported declared local slot count
+#endif
 #if TV_PERTURBATION_WORKLOAD == 0
 static const char *workload = "fma";
 #elif TV_PERTURBATION_WORKLOAD == 1
@@ -61,16 +67,16 @@ __global__ void perturbation_body(float *output, BodyInterval *intervals,
   value = c0 + c1 + c2 + c3;
 #else
   // Deliberate local-memory traffic, not a claim about compiler-inferred spills.
-  volatile float local_values[128];
-  for (int j = 0; j < 128; ++j) local_values[j] = value;
+  volatile float local_values[TV_LOCAL_SLOTS];
+  for (int j = 0; j < TV_LOCAL_SLOTS; ++j) local_values[j] = value;
   for (int i = 0; i < iterations; ++i) {
-    float x = local_values[i & 127];
+    float x = local_values[i & (TV_LOCAL_SLOTS - 1)];
     asm volatile("fma.rn.f32 %0, %0, %1, %2;"
                  : "+f"(x) : "f"(0.999999f), "f"(0.000001f));
-    local_values[i & 127] = x;
+    local_values[i & (TV_LOCAL_SLOTS - 1)] = x;
   }
   value = 0;
-  for (int j = 0; j < 128; ++j) value += local_values[j];
+  for (int j = 0; j < TV_LOCAL_SLOTS; ++j) value += local_values[j];
 #endif
   output[blockIdx.x * blockDim.x + threadIdx.x] = value;
   __syncthreads();
@@ -80,13 +86,18 @@ __global__ void perturbation_body(float *output, BodyInterval *intervals,
   }
 }
 int main(int argc, char **argv) {
-  // MODE LIBRARY PROGRAMS ITERATIONS; fixed 11 groups x 32 launches.
-  if (argc != 5) return 2;
+  // MODE LIBRARY PROGRAMS ITERATIONS [counter_only]. Timing uses 11 x 32 launches.
+  if (argc != 5 && argc != 6) return 2;
+  const bool counter_only = argc == 6 && std::strcmp(argv[5], "counter_only") == 0;
+  if (argc == 6 && (!counter_only || std::strcmp(argv[1], "none") != 0)) return 2;
+  const int samples = counter_only ? 1 : 352;
   const bool enabled = std::strcmp(argv[1], "software_serial") == 0;
   if (!enabled && std::strcmp(argv[1], "none") != 0) return 2;
   const int programs = std::atoi(argv[3]), iterations = std::atoi(argv[4]);
-  if ((programs != 48 && programs != 96 && programs != 384) ||
+  if ((programs != 48 && programs != 96 && programs != 192 && programs != 384) ||
       (iterations != 16 && iterations != 65536)) return 2;
+  if (programs == 192 && !counter_only) return 2;
+  if (counter_only && (TV_PERTURBATION_WORKLOAD != 2 || iterations != 65536)) return 2;
   void *library = nullptr;
   int (*flush)() = nullptr, (*close)() = nullptr;
   size_t (*count)() = nullptr, (*dropped)() = nullptr;
@@ -110,6 +121,10 @@ int main(int argc, char **argv) {
   std::printf("role=control,eligible_for_fit=false,mode=%s,programs=%d,iterations=%d\n",
               argv[1], programs, iterations);
   std::printf("workload=%s\n", workload);
+#if TV_PERTURBATION_WORKLOAD == 2
+  std::printf("local_slots=%d\n", TV_LOCAL_SLOTS);
+#endif
+  if (counter_only) std::printf("purpose=counter_only,measurement_samples=1\n");
   auto drain = [&](int sample) {
     if (!enabled) return true;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -149,7 +164,7 @@ int main(int argc, char **argv) {
   BodyInterval *intervals;
   check(cudaMalloc(&sweep, 2 * size_t(l2)));
   check(cudaMalloc(&output, programs * 128 * sizeof(float)));
-  check(cudaMalloc(&intervals, programs * 353 * sizeof(BodyInterval)));
+  check(cudaMalloc(&intervals, programs * (samples + 1) * sizeof(BodyInterval)));
   cudaStream_t stream;
   check(cudaStreamCreate(&stream));
   auto launch = [&](int slot) {
@@ -162,14 +177,14 @@ int main(int argc, char **argv) {
   auto start = std::chrono::steady_clock::now();
   int warmups = 0;
   bool valid = true;
-  do {
-    launch(352);
+  if (!counter_only) do {
+    launch(samples);
     valid = drain(-1);
     ++warmups;
   } while (valid && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 0.5);
   std::printf("warmup_launches=%d\n", warmups);
   int completed = 0;
-  for (int sample = 0; sample < 352 && valid; ++sample) {
+  for (int sample = 0; sample < samples && valid; ++sample) {
     launch(sample);
     ++completed;
     valid = drain(sample);
@@ -192,11 +207,11 @@ int main(int argc, char **argv) {
 #elif TV_PERTURBATION_WORKLOAD == 1
     x = float(64 * iterations);
 #else
-    float slots[128];
-    for (int j = 0; j < 128; ++j) slots[j] = x;
-    for (int i = 0; i < iterations; ++i) slots[i & 127] = std::fma(slots[i & 127], 0.999999f, 0.000001f);
+    float slots[TV_LOCAL_SLOTS];
+    for (int j = 0; j < TV_LOCAL_SLOTS; ++j) slots[j] = x;
+    for (int i = 0; i < iterations; ++i) slots[i & (TV_LOCAL_SLOTS - 1)] = std::fma(slots[i & (TV_LOCAL_SLOTS - 1)], 0.999999f, 0.000001f);
     x = 0;
-    for (int j = 0; j < 128; ++j) x += slots[j];
+    for (int j = 0; j < TV_LOCAL_SLOTS; ++j) x += slots[j];
 #endif
     reference[t] = x;
   }
@@ -206,5 +221,5 @@ int main(int argc, char **argv) {
   check(cudaStreamDestroy(stream));
   check(cudaFree(intervals)); check(cudaFree(output)); check(cudaFree(sweep));
   if (library) dlclose(library);
-  return valid && completed == 352 && close_status == 0 ? 0 : 5;
+  return valid && completed == samples && close_status == 0 ? 0 : 5;
 }
