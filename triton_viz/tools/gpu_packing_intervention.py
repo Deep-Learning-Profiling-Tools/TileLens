@@ -232,7 +232,14 @@ def main(argv=None):
     parser.add_argument(
         "--mode", choices=("fma", "value_pairs", "unroll", "nounroll"), default="fma"
     )
+    parser.add_argument(
+        "--all-declared-controls",
+        action="store_true",
+        help="Apply nounroll to the entire declared geometry-dot control manifest",
+    )
     args = parser.parse_args(argv)
+    if args.all_declared_controls and args.mode != "nounroll":
+        raise ValueError("Full-manifest intervention currently requires nounroll")
     if args.output.exists():
         raise ValueError("Use a fresh experiment directory")
     manifest = json.loads((args.resource_root / "manifest.json").read_text())
@@ -253,6 +260,14 @@ def main(argv=None):
             )
         ]
     cases = {c["id"]: c for c in manifest["cases"]}
+    if len(cases) != len(manifest["cases"]) or not cases:
+        raise ValueError("Require nonempty unique declared controls")
+    if args.all_declared_controls:
+        if any(c.get("kind") != "geometry_dot" for c in cases.values()):
+            raise ValueError(
+                "Full-manifest nounroll requires pure geometry-dot controls"
+            )
+        ids = list(cases)
     if not set(ids) <= set(cases):
         raise ValueError("Missing declared matched controls")
     version = subprocess.run(
@@ -267,6 +282,7 @@ def main(argv=None):
             ptxas_sha256=hashlib.sha256(args.ptxas.read_bytes()).hexdigest(),
             regalloc_opt_level=args.regalloc_opt_level,
             intervention=args.mode,
+            all_declared_controls=args.all_declared_controls,
             eligible_for_fit=False,
             gpu_execution=False,
             require_archived_baseline=True,

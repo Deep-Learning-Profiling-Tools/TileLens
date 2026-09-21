@@ -37,6 +37,43 @@ def test_nounroll_is_module_scoped_and_changes_only_the_directive():
         variants(row, "nounroll")
 
 
+@pytest.mark.parametrize(
+    "cases,mode,error",
+    [
+        ([], "nounroll", "nonempty unique"),
+        ([dict(id="a"), dict(id="a")], "nounroll", "nonempty unique"),
+        ([dict(id="a", kind="composition")], "nounroll", "pure geometry-dot"),
+        ([dict(id="a", kind="geometry_dot")], "fma", "requires nounroll"),
+    ],
+)
+def test_full_manifest_intervention_rejects_invalid_declarations(
+    tmp_path, cases, mode, error
+):
+    from triton_viz.tools.gpu_packing_intervention import main
+
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(dict(role="control", cases=cases))
+    )
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match=error):
+        main(
+            [
+                "--resource-root",
+                str(tmp_path),
+                "--output",
+                str(output),
+                "--ptxas",
+                "must-not-execute",
+                "--cuobjdump",
+                "must-not-execute",
+                "--mode",
+                mode,
+                "--all-declared-controls",
+            ]
+        )
+    assert not output.exists()
+
+
 def loop_ptx():
     return """mov.b64 %rd0, 0;
 $L_loop:
@@ -150,9 +187,11 @@ def test_target_and_modified_artifacts_rejected():
         variants(row)
 
 
-@pytest.mark.parametrize("mode", ["fma", "nounroll"])
+@pytest.mark.parametrize(
+    "mode,all_declared", [("fma", False), ("nounroll", False), ("nounroll", True)]
+)
 def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
-    tmp_path, monkeypatch, mode
+    tmp_path, monkeypatch, mode, all_declared
 ):
     from triton_viz.tools import gpu_packing_intervention as tool
 
@@ -172,6 +211,8 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
                 ("float32", "ieee", 256, 4),
             )
         ]
+    if all_declared:
+        cases = [dict(id="independent_control", kind="geometry_dot")]
     (root / "manifest.json").write_text(json.dumps(dict(role="control", cases=cases)))
     ptx = ".target sm_121a\n.address_size 64\nfma.rn.f32x2 %rd0, %rd1, %rd2, %rd0;\n"
     for case in cases:
@@ -209,9 +250,10 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
             "2",
             "--mode",
             mode,
+            *(["--all-declared-controls"] if all_declared else []),
         ]
     )
-    assert sum("-o" in c for c in invocations) == 8
+    assert sum("-o" in c for c in invocations) == 2 * len(cases)
     report = json.loads((output / cases[0]["id"] / "original.json").read_text())
     assert report["matches_archived_cubin"] and report["matches_archived_sass"]
     assert report["numerical_validation"] == "not executed"
@@ -219,6 +261,8 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
     assert manifest["regalloc_opt_level"] == 2 and not manifest["gpu_execution"]
     assert not manifest["eligible_for_fit"]
     assert manifest["intervention"] == mode
+    assert manifest["all_declared_controls"] == all_declared
+    assert manifest["cases"] == cases
     variant = "nounroll" if mode == "nounroll" else "scalar_fma"
     changed_report = json.loads(
         (output / cases[0]["id"] / (variant + ".json")).read_text()
@@ -245,6 +289,7 @@ def test_offline_runner_preserves_actual_assembler_flag_and_reproduction_checks(
                 "2",
                 "--mode",
                 mode,
+                *(["--all-declared-controls"] if all_declared else []),
             ]
         )
     assert (failed / cases[0]["id"] / "original.json").exists()
