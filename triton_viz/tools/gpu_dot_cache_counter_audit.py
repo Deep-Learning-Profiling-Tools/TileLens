@@ -19,7 +19,7 @@ from triton_viz.tools.gpu_local_counter_audit import validate_monitor
 from triton_viz.tools.gpu_local_counter_collect import CACHE_METRICS, ISSUE_METRICS
 
 
-def parse_issue(text):
+def parse_issue(text, *, retain_invalid_stalls=False):
     lines = text.splitlines()
     header = next((i for i, line in enumerate(lines) if line.startswith('"ID",')), None)
     if header is None:
@@ -40,7 +40,7 @@ def parse_issue(text):
         if (
             not math.isfinite(value)
             or value < 0
-            or (percent and value > 100)
+            or (percent and value > 100 and not retain_invalid_stalls)
             or (not percent and not value.is_integer())
         ):
             raise ValueError("Invalid instruction counter value")
@@ -86,7 +86,9 @@ def parse(text):
     return result
 
 
-def audit(root, *, issue_work=False):
+def audit(root, *, issue_work=False, retain_invalid_stalls=False):
+    if retain_invalid_stalls and not issue_work:
+        raise ValueError("Invalid-stall retention only applies to issue diagnostics")
     manifest = json.loads((root / "manifest.json").read_text())
     suite = manifest.get("suite")
     if suite not in {"pressure", "pressure_pipeline", "resource_dot"}:
@@ -111,11 +113,22 @@ def audit(root, *, issue_work=False):
             not in path.with_suffix(".log").read_text()
         ):
             raise ValueError("Missing numerical validation")
+        counters = (
+            parse_issue(path.read_text(), retain_invalid_stalls=retain_invalid_stalls)
+            if issue_work
+            else parse(path.read_text())
+        )
+        errors = (
+            {k: v for k, v in counters.items() if k.endswith(".pct") and v > 100}
+            if issue_work
+            else {}
+        )
         rows.append(
             dict(
                 case=case,
                 csv_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                counters=(parse_issue if issue_work else parse)(path.read_text()),
+                counters=counters,
+                **(dict(invalid_stall_percentages=errors) if issue_work else {}),
             )
         )
     return dict(
@@ -123,6 +136,15 @@ def audit(root, *, issue_work=False):
         count=len(rows),
         rows=rows,
         complete=True,
+        **(
+            dict(
+                stall_measurement_integrity_passed=not any(
+                    r["invalid_stall_percentages"] for r in rows
+                )
+            )
+            if issue_work
+            else {}
+        ),
         eligible_for_fit=False,
         released_model=None,
         caveat="Control instruction/stall diagnostics only. Warp-active stall fractions are not additive latency components or source prediction inputs. No profiler timing fit."
@@ -136,10 +158,15 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--issue-work", action="store_true")
+    parser.add_argument("--retain-invalid-stalls", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError("Fresh audit output required")
-    report = audit(args.root, issue_work=args.issue_work)
+    report = audit(
+        args.root,
+        issue_work=args.issue_work,
+        retain_invalid_stalls=args.retain_invalid_stalls,
+    )
     _write(args.output, report)
     print(dict(count=report["count"], complete=report["complete"]))
 

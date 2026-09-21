@@ -27,6 +27,12 @@ def test_instruction_phase_has_typed_counters_not_profile_timing():
     assert result[ISSUE_METRICS[4]] == 10.5
     with pytest.raises(ValueError, match="Invalid"):
         parse_issue(text.replace('"10.5"', '"101"'))
+    retained = parse_issue(
+        text.replace('"10.5"', '"107.14"'), retain_invalid_stalls=True
+    )
+    assert retained[ISSUE_METRICS[4]] == 107.14
+    with pytest.raises(ValueError, match="Invalid"):
+        parse_issue(text.replace('"10.5"', '"nan"'), retain_invalid_stalls=True)
     with pytest.raises(ValueError, match="Unexpected"):
         parse_issue(text.replace('"inst"', '"cycle"'))
     for command in commands("ncu", Path("output"), issue_work=True):
