@@ -19,12 +19,19 @@ from triton_viz.core.client import Client
 class PerformanceTrace(Client):
     NAME = "performance_trace"
 
-    def __init__(self):
+    def __init__(self, *, capture_cache=False):
         super().__init__()
         self.events: list[dict[str, Any]] = []
         self.grid: tuple[int, ...] = ()
         self._values: dict[int, int] = {}
         self._keepalive: list[Any] = []
+        self._load_sectors: set[int] = set()
+        self._load_requests = 0
+        self._store_requests = 0
+        self._program_loads: dict[tuple[int, ...], int] = {}
+        self.capture_cache = capture_cache
+        self._cache_ids: dict[int, int] = {}
+        self._cache_accesses: list[dict[str, Any]] = []
 
     def pre_run_callback(self, fn):
         return True
@@ -122,13 +129,37 @@ class PerformanceTrace(Client):
                     raise ValueError("Cannot determine semantic memory element width")
                 item_bytes = max(1, int(width // 8))
                 addresses = ptr[active].astype(np.uint64)
-                sectors = np.unique(addresses // 32).size
+                sector_ids = np.unique(addresses // 32)
                 if item_bytes > 1 and addresses.size:
-                    sectors = np.unique(
+                    sector_ids = np.unique(
                         np.concatenate(
                             (addresses // 32, (addresses + item_bytes - 1) // 32)
                         )
-                    ).size
+                    )
+                sectors = int(sector_ids.size)
+                if self.capture_cache:
+                    blocks = []
+                    for sector in map(int, sector_ids):
+                        if sector not in self._cache_ids:
+                            self._cache_ids[sector] = len(self._cache_ids)
+                        blocks.append(self._cache_ids[sector])
+                    self._cache_accesses.append(
+                        dict(
+                            seq=seq,
+                            program=list(self.grid_idx or ()),
+                            op="load" if name in {"load", "raw_load"} else "store",
+                            blocks=blocks,
+                        )
+                    )
+                if name in {"load", "raw_load"}:
+                    self._load_sectors.update(map(int, sector_ids))
+                    self._load_requests += sectors
+                    program = tuple(self.grid_idx or ())
+                    self._program_loads[program] = (
+                        self._program_loads.get(program, 0) + sectors
+                    )
+                else:
+                    self._store_requests += sectors
                 event.update(
                     bytes=int(active.sum()) * item_bytes,
                     sectors=int(sectors),
@@ -240,11 +271,15 @@ def _bf16_constant_compat():
         yield
 
 
-def observe(kernel, grid, *args, num_warps=4, num_stages=2, **kwargs):
+def observe(
+    kernel, grid, *args, num_warps=4, num_stages=2, capture_cache=False, **kwargs
+):
     """Interpret a fixed Triton launch on CPU and return portable source facts.
 
     Pass CPU tensors. Autotuners must be resolved to a fixed configuration first.
     Source interpretation executes stores into those CPU tensors.
+    Optional cache accesses use canonical sector IDs, including stores/aliases.
+    Their order is the interpreter's order, not a measured hardware schedule.
     """
     import triton_viz
 
@@ -252,16 +287,41 @@ def observe(kernel, grid, *args, num_warps=4, num_stages=2, **kwargs):
         raise ValueError("Observe requires CPU inputs, independent of target execution")
     if hasattr(kernel, "configs"):
         raise ValueError("Resolve autotuning before pre-compile prediction")
-    trace = PerformanceTrace()
+    trace = PerformanceTrace(capture_cache=capture_cache)
     with _bf16_constant_compat():
         triton_viz.trace(trace)(kernel)[grid](
             *args, num_warps=num_warps, num_stages=num_stages, **kwargs
         )
-    return {
+    source = {
         "schema": "triton-viz.gpu-source.v1",
         "grid": list(trace.grid),
         "program_count": math.prod(trace.grid),
         "num_warps": num_warps,
         "num_stages": num_stages,
         "events": trace.events,
+        # Addresses exist only transiently during observation. Export counts,
+        # never process-specific pointers. Masking/raw delegation use the same
+        # audited access path as legacy per-event sector accounting.
+        "memory_working_set": {
+            "schema": "triton-viz.gpu-memory-working-set.v1",
+            "load_unique_sectors": len(trace._load_sectors),
+            "load_sector_requests": trace._load_requests,
+            "store_sector_requests": trace._store_requests,
+            "program_load_sectors_p90": float(
+                np.quantile(
+                    list(trace._program_loads.values())
+                    + [0] * (math.prod(trace.grid) - len(trace._program_loads)),
+                    0.9,
+                )
+            ),
+        },
     }
+    if capture_cache:
+        source["cache_access_trace"] = dict(
+            schema="triton-viz.gpu-source-cache-access.v1",
+            block_bytes=32,
+            order="interpreter_program_order_not_hardware_schedule",
+            unique_blocks=len(trace._cache_ids),
+            accesses=trace._cache_accesses,
+        )
+    return source

@@ -1,0 +1,7 @@
+{
+  "schema": "triton-viz.gpu-selection-stability-controls.v1",
+  "role": "control",
+  "template_programs": 8,
+  "programs": [48, 96, 384],
+  "template_suites": ["precision", "geometry", "structure"]
+}

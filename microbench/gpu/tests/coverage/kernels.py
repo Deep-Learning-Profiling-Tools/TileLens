@@ -66,6 +66,10 @@ def _values(shape, dtype):
 
 
 def prepare(case, device):
+    if case["kind"].startswith("structure_"):
+        from .structure import prepare as prepare_structure
+
+        return prepare_structure(case, device)
     if case["kind"] == "geometry_dot":
         from .geometry import prepare as prepare_geometry
 
@@ -100,6 +104,10 @@ def prepare(case, device):
 
 
 def check_output(case, output):
+    if case["kind"].startswith("structure_"):
+        from .structure import check_output as check_structure
+
+        return check_structure(case, output)
     if case["kind"] == "geometry_dot":
         from .geometry import check_output as check_geometry
 

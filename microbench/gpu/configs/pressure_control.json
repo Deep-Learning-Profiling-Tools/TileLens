@@ -1,0 +1,10 @@
+{
+  "schema": "triton-viz.gpu-register-pressure-controls.v1",
+  "role": "control",
+  "programs": [48],
+  "tiles": [[64, 128, 32], [128, 128, 32], [256, 128, 32], [256, 256, 32]],
+  "precisions": [["float32", "ieee"], ["float32", "tf32"], ["bfloat16", "ieee"], ["float16", "ieee"]],
+  "warps": [4, 8],
+  "num_stages": 1,
+  "repeat": 5
+}

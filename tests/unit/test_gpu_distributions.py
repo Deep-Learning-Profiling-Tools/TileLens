@@ -7,6 +7,29 @@ from triton_viz.tools import gpu_distribution_experiments as experiments
 from triton_viz.tools.gpu_cost_model_pipeline import _write
 
 
+def test_only_nonconvergence_can_reject_candidate(monkeypatch):
+    names = ("aggregate", "program_distribution")
+
+    def fit(rows, features, **kwargs):
+        if features == experiments.FEATURE_SETS["aggregate"]:
+            raise ValueError("Nonnegative calibration did not converge")
+        return {"valid": True}
+
+    monkeypatch.setattr(experiments, "fit_controls", fit)
+    models, rejected = experiments.fit_candidates([], names, "test")
+    assert list(models) == ["program_distribution"]
+    assert rejected["aggregate"]["reason"] == "nonconvergence"
+    with pytest.raises(ValueError, match="All candidates failed"):
+        experiments.fit_candidates([], names[:1], "test")
+
+    def invalid(*args, **kwargs):
+        raise ValueError("Control fingerprint mismatch")
+
+    monkeypatch.setattr(experiments, "fit_controls", invalid)
+    with pytest.raises(ValueError, match="Control fingerprint mismatch"):
+        experiments.fit_candidates([], names, "test")
+
+
 def _event(seq, program, op="binary_op", dependencies=(), elements=32):
     return dict(
         seq=seq,
@@ -104,6 +127,9 @@ def test_nested_ablation_reads_controls_only(tmp_path, monkeypatch):
     artifact = original(tmp_path / "ablation/frozen_ablation.json")
     assert artifact["selected"] == "aggregate"
     assert artifact["nested_mape_pct"] < 1e-5
+    for fold in artifact["nested_cv"]:
+        assert set(fold["candidate_cv_mape_pct"]) == set(artifact["models"])
+        assert fold["selection_margin_pct"] >= 0
     from triton_viz.performance import GpuBackend, predict_latency
 
     distribution_model = artifact["models"]["program_distribution"]

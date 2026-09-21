@@ -12,6 +12,18 @@ DOT_FEATURES = tuple(
 )
 
 
+WAVE_DOT_FEATURES = tuple(f"wave_dot_flops_{kind}" for kind in DOT_CLASSES)
+
+
+def wave_dot_features(features):
+    """Source program-tail demand times hardware SM waves, not measured occupancy."""
+    return {
+        f"wave_dot_flops_{kind}": features["waves"]
+        * features[f"program_dot_p90_{kind}"]
+        for kind in DOT_CLASSES
+    }
+
+
 def dot_features(source):
     """Return split work, explicit semantic configurations and OOD reasons.
 

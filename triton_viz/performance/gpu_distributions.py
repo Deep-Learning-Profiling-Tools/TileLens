@@ -12,7 +12,8 @@ from collections import defaultdict
 import numpy as np
 
 from .gpu import FEATURES, _ALU, _REDUCE, _SFU
-from .gpu_dot_precision import DOT_FEATURES
+from .gpu_dot_precision import DOT_FEATURES, WAVE_DOT_FEATURES
+from .gpu_memory import MEMORY_FEATURES, PRESSURE_FEATURE
 
 PROGRAM_FEATURES = (
     "program_alu_p90",
@@ -40,6 +41,23 @@ FEATURE_SETS["dot_precision_combined"] = (
     )
     + DOT_FEATURES
 )
+FEATURE_SETS["dot_precision_memory"] = (
+    tuple(k for k in FEATURE_SETS["dot_precision_combined"] if k != "global_sectors")
+    + MEMORY_FEATURES
+)
+FEATURE_SETS["dot_precision_memory_pressure"] = FEATURE_SETS["dot_precision_memory"] + (
+    PRESSURE_FEATURE,
+)
+
+
+for base, name in (
+    ("dot_precision_combined", "dot_precision_wave"),
+    ("dot_precision_memory", "dot_precision_memory_wave"),
+):
+    FEATURE_SETS[name] = (
+        tuple(k for k in FEATURE_SETS[base] if k not in DOT_FEATURES)
+        + WAVE_DOT_FEATURES
+    )
 
 
 def distribution_features(source):

@@ -8,10 +8,117 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
 def load_cases(suite, role):
-    if suite not in {"pilot", "compositional", "coverage", "precision", "geometry"}:
+    if suite not in {
+        "pilot",
+        "compositional",
+        "coverage",
+        "precision",
+        "geometry",
+        "structure",
+        "stability",
+        "pressure",
+    }:
         raise ValueError("Unknown GPU control suite")
     if role not in {"control", "holdout"}:
         raise ValueError("Unknown artifact role")
+    if suite == "pressure":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "pressure_control.json").read_text())
+        if (data["schema"], data["role"]) != (
+            "triton-viz.gpu-register-pressure-controls.v1",
+            "control",
+        ):
+            raise ValueError("Invalid register pressure declaration")
+        return [
+            dict(
+                id=f"pressure_p{p}_{dtype}_{precision}_{bm}x{bn}x{bk}_w{warps}",
+                kind="geometry_dot",
+                programs=p,
+                dtype=dtype,
+                precision=precision,
+                bm=bm,
+                bn=bn,
+                bk=bk,
+                num_warps=warps,
+                num_stages=data["num_stages"],
+                repeat=data["repeat"],
+                reuse="none",
+                cv_group=f"pressure_{bm}x{bn}x{bk}",
+            )
+            for p, (dtype, precision), (bm, bn, bk), warps in product(
+                data["programs"], data["precisions"], data["tiles"], data["warps"]
+            )
+        ]
+    if suite == "stability":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "stability_control.json").read_text())
+        if (data["schema"], data["role"]) != (
+            "triton-viz.gpu-selection-stability-controls.v1",
+            "control",
+        ):
+            raise ValueError("Invalid selection stability declaration")
+        templates = [
+            c
+            for base in data["template_suites"]
+            for c in load_cases(base, "control")
+            if c.get("programs") == data["template_programs"]
+        ]
+        if len({c["id"] for c in templates}) != len(templates):
+            raise ValueError("Duplicate stability templates")
+        result = []
+        for programs, template in product(data["programs"], templates):
+            case = {
+                **template,
+                "id": f"stability_p{programs}__{template['id']}",
+                "programs": programs,
+                "cv_group": str(programs),
+                "template_id": template["id"],
+            }
+            if "pair_id" in template:
+                case["pair_id"] = f"stability_p{programs}__{template['pair_id']}"
+            result.append(case)
+        return result
+    if suite == "structure":
+        if role == "holdout":
+            return []
+        data = json.loads((CONFIGS / "structure_control.json").read_text())
+        if (data["schema"], data["role"]) != (
+            "triton-viz.gpu-dot-structure-controls.v1",
+            "control",
+        ):
+            raise ValueError("Invalid dot structure declaration")
+        result = []
+        for family in ("stream", "composition"):
+            for p, (dtype, precision), (bm, bn, bk), variant in product(
+                data["programs"],
+                data["precisions"],
+                data[f"{family}_tiles"],
+                data["stream_layouts"]
+                if family == "stream"
+                else data["composition_modes"],
+            ):
+                group = f"structure_{family}_p{p}_{dtype}_{precision}_{bm}x{bn}x{bk}"
+                result.append(
+                    dict(
+                        id=f"{group}_{variant}",
+                        kind=f"structure_{family}",
+                        programs=p,
+                        dtype=dtype,
+                        precision=precision,
+                        bm=bm,
+                        bn=bn,
+                        bk=bk,
+                        variant=variant,
+                        repeat=data["stream_repeat"] if family == "stream" else 1,
+                        num_warps=data["num_warps"],
+                        num_stages=data["num_stages"],
+                        cv_group=str(p),
+                        pair_id=group,
+                    )
+                )
+        return result
     if suite == "geometry":
         # A diagnostic, control-only factorial experiment; no target declaration.
         if role == "holdout":

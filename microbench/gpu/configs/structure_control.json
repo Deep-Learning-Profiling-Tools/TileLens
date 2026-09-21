@@ -1,0 +1,13 @@
+{
+  "schema": "triton-viz.gpu-dot-structure-controls.v1",
+  "role": "control",
+  "programs": [8, 64],
+  "precisions": [["float32", "ieee"], ["float32", "tf32"], ["bfloat16", "ieee"], ["float16", "ieee"]],
+  "stream_tiles": [[64, 64, 32], [128, 128, 32], [128, 128, 64]],
+  "stream_repeat": 17,
+  "stream_layouts": ["packed", "strided"],
+  "composition_tiles": [[32, 64, 32], [64, 64, 32]],
+  "composition_modes": [0, 1, 2],
+  "num_warps": 8,
+  "num_stages": 2
+}

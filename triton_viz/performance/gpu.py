@@ -1,8 +1,11 @@
 """Experimental GPU backend: source work expansion and calibrated service time.
 
-This is a source-only, steady-cache model, not an instruction simulator. The
-additive service-time combiner is intentionally separate from NKI scheduling.
-It does not claim to predict spills, cache misses, or asynchronous pipelines.
+Prediction consumes source traces and frozen calibration tables only; control
+calibration may study compiler artifacts and hardware profiles. Cache misses,
+register spills and pipeline behavior are modeling targets, not exclusions.
+Existing tables retain their recorded steady-cache measurement protocol: they
+must not be relabeled as cold-cache or spill-aware without control validation.
+The service-time combiner is separate from NKI scheduling.
 """
 
 from __future__ import annotations
@@ -192,6 +195,16 @@ def predict(source, calibration, *, fingerprint, sm_count, strict=True):
                 for c in configurations
             ):
                 work["ood_reasons"].append("uncovered_dot_precision_configuration")
+        if feature_set.endswith("_wave"):
+            from .gpu_dot_precision import wave_dot_features
+
+            work["features"].update(wave_dot_features(work["features"]))
+        if feature_set.startswith("dot_precision_memory"):
+            from .gpu_memory import memory_features
+
+            memory_work, memory_reasons = memory_features(source)
+            work["features"].update(memory_work)
+            work["ood_reasons"].extend(memory_reasons)
     reasons = work["ood_reasons"][:]
     configuration = source_configuration(work)
     if configuration not in calibration.get("source_configurations", []):

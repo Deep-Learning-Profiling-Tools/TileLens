@@ -27,7 +27,26 @@ def enrich(source, sm_count):
     return {**work["features"], **features}, source_configuration(work), distributions
 
 
-def fit(root, output, *, dot_precision=False):
+def fit_candidates(rows, names, fingerprint):
+    """Numerical rejection is candidate-local; invalid data must fail closed."""
+    models, rejected = {}, {}
+    for name in names:
+        try:
+            models[name] = fit_controls(
+                rows, FEATURE_SETS[name], fingerprint=fingerprint
+            )
+        except ValueError as exc:
+            if str(exc) != "Nonnegative calibration did not converge":
+                raise
+            rejected[name] = {"reason": "nonconvergence", "message": str(exc)}
+    if not models:
+        raise ValueError(f"All candidates failed numerical convergence: {rejected}")
+    return models, rejected
+
+
+def fit(root, output, *, dot_precision=False, memory_working_set=False, wave_dot=False):
+    memory_working_set = memory_working_set or wave_dot
+    dot_precision = dot_precision or memory_working_set
     manifest = _read(root / "manifest.json")
     rows = []
     configurations = []
@@ -37,6 +56,14 @@ def fit(root, output, *, dot_precision=False):
         if dot_precision
         else LEGACY_FEATURE_SETS
     )
+    if memory_working_set:
+        candidate_names = (
+            "dot_precision_combined",
+            "dot_precision_memory",
+            "dot_precision_memory_pressure",
+        )
+    if wave_dot:
+        candidate_names += ("dot_precision_wave", "dot_precision_memory_wave")
     for case in manifest["splits"]["control"]:
         row = _read(root / "controls" / (case["id"] + ".json"))
         features, configuration, _ = enrich(
@@ -50,15 +77,29 @@ def fit(root, output, *, dot_precision=False):
             for config in dot_configs:
                 if config not in dot_configurations:
                     dot_configurations.append(config)
+        if memory_working_set:
+            from triton_viz.performance.gpu_memory import memory_features
+
+            extra, reasons = memory_features(row["source"])
+            if reasons:
+                raise ValueError(f"Unsupported control memory metadata: {reasons}")
+            features.update(extra)
+        if wave_dot:
+            from triton_viz.performance.gpu_dot_precision import wave_dot_features
+
+            features.update(wave_dot_features(features))
+        if wave_dot:
+            # Hash complete source once, rather than serializing giant traces
+            # again for every nested fit's provenance digest. Numeric inputs,
+            # every measurement and the full source on disk remain unchanged.
+            row = {
+                **{k: v for k, v in row.items() if k != "source"},
+                "source_digest": stable_digest(row["source"]),
+            }
         rows.append({**row, "features": features})
         if configuration not in configurations:
             configurations.append(configuration)
-    models = {
-        name: fit_controls(
-            rows, FEATURE_SETS[name], fingerprint=manifest["fingerprint"]
-        )
-        for name in candidate_names
-    }
+    models, rejected = fit_candidates(rows, candidate_names, manifest["fingerprint"])
     for name, model in models.items():
         model["feature_set"] = name
         model["source_configurations"] = configurations
@@ -85,13 +126,12 @@ def fit(root, output, *, dot_precision=False):
     for group in groups:
         training = [r for r in rows if r["cv_group"] != group]
         testing = [r for r in rows if r["cv_group"] == group]
-        inner = {
-            name: fit_controls(
-                training, FEATURE_SETS[name], fingerprint=manifest["fingerprint"]
-            )
-            for name in candidate_names
-        }
+        inner, inner_rejected = fit_candidates(
+            training, candidate_names, manifest["fingerprint"]
+        )
         chosen = select(inner)
+        scores = {name: model["cv"]["mape_pct"] for name, model in inner.items()}
+        ranked = sorted(scores.values())
         coefficients = inner[chosen]["coefficients_us"]
         errors = [
             100
@@ -105,7 +145,12 @@ def fit(root, output, *, dot_precision=False):
         nested.append(
             {
                 "group": group,
+                "rejected_candidates": inner_rejected,
                 "selected": chosen,
+                "candidate_cv_mape_pct": scores,
+                "selection_margin_pct": ranked[1] - ranked[0]
+                if len(ranked) > 1
+                else None,
                 "errors_pct": errors,
                 "mape_pct": float(np.mean(np.abs(errors))),
             }
@@ -114,6 +159,7 @@ def fit(root, output, *, dot_precision=False):
         "schema": "triton-viz.gpu-distribution-experiment.v1",
         "fingerprint": manifest["fingerprint"],
         "models": models,
+        "rejected_candidates": rejected,
         "selected": selected,
         "nested_cv": nested,
         "nested_mape_pct": float(
@@ -164,11 +210,21 @@ def evaluate(root, output):
         raise ValueError("Selected calibration failed the control/nested CV gate")
     reports = {}
     baseline = (
-        "dot_precision_aggregate"
-        if selected.startswith("dot_precision_")
-        else "aggregate"
+        "dot_precision_combined"
+        if "dot_precision_memory" in frozen["models"]
+        else (
+            "dot_precision_aggregate"
+            if selected.startswith("dot_precision_")
+            else "aggregate"
+        )
     )
     for name in dict.fromkeys((baseline, selected)):
+        if name not in frozen["models"]:
+            reports[name] = {
+                "status": "rejected_control_numerics",
+                "reason": frozen.get("rejected_candidates", {}).get(name),
+            }
+            continue
         model = frozen["models"][name]
         if not model["cv"]["passed"]:
             reports[name] = {"status": "rejected_control_cv", "cv": model["cv"]}
@@ -230,6 +286,12 @@ def main(argv=None):
     parser.add_argument("stage", choices=("fit", "evaluate"))
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--wave-dot", action="store_true")
+    parser.add_argument(
+        "--memory-working-set",
+        action="store_true",
+        help="Compare preregistered precision/memory candidates on controls only",
+    )
     parser.add_argument(
         "--dot-precision",
         action="store_true",
@@ -237,7 +299,13 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     if args.stage == "fit":
-        fit(args.root, args.output, dot_precision=args.dot_precision)
+        fit(
+            args.root,
+            args.output,
+            dot_precision=args.dot_precision,
+            memory_working_set=args.memory_working_set,
+            wave_dot=args.wave_dot,
+        )
     else:
         evaluate(args.root, args.output)
 

@@ -9,6 +9,90 @@ from triton_viz.performance.triton_observe import observe
 
 
 @pytest.mark.parametrize(
+    "feature_set", ["dot_precision_wave", "dot_precision_memory_wave"]
+)
+def test_public_wave_prediction_prices_sm_rounds(feature_set):
+    from triton_viz.performance.gpu import expand, predict, source_configuration
+    from triton_viz.performance.gpu_distributions import FEATURE_SETS
+
+    for programs, waves in ((8, 1), (64, 2), (192, 4)):
+        source = dict(
+            schema="triton-viz.gpu-source.v1",
+            program_count=programs,
+            num_warps=8,
+            num_stages=2,
+            events=[
+                dict(
+                    seq=p,
+                    program=[p, 0, 0],
+                    op="dot",
+                    dependencies=[],
+                    dtype="fp32",
+                    shape=[16, 16],
+                    elements=256,
+                    input_shapes=[[16, 16], [16, 16]],
+                    dot_input_dtypes=["fp32", "fp32"],
+                    dot_accumulator_dtype="fp32",
+                    dot_input_precision="tf32",
+                )
+                for p in range(programs)
+            ],
+            memory_working_set=dict(
+                schema="triton-viz.gpu-memory-working-set.v1",
+                load_unique_sectors=0,
+                load_sector_requests=0,
+                store_sector_requests=0,
+                program_load_sectors_p90=0,
+            ),
+        )
+        names = FEATURE_SETS[feature_set]
+        # Unit-test prices only: no measured data or experiment calibration.
+        coefficients = dict.fromkeys(names, 0.0)
+        coefficients["wave_dot_flops_tf32"] = 0.001
+        model = dict(
+            feature_set=feature_set,
+            feature_names=list(names),
+            coefficients_us=coefficients,
+            fingerprint="test",
+            cv={"passed": True},
+            domain={name: [0, 1e12] for name in names},
+            source_configurations=[source_configuration(expand(source, sm_count=48))],
+            dot_configurations=dot_features(source)[1],
+        )
+        prediction = predict(source, model, fingerprint="test", sm_count=48)
+        assert not prediction["ood_reasons"]
+        assert prediction["latency_us"] == pytest.approx(waves * 8192 * 0.001)
+
+
+@pytest.mark.parametrize(
+    "programs,waves", [(8, 1), (48, 1), (49, 2), (64, 2), (192, 4)]
+)
+def test_wave_dot_scaling_uses_hardware_waves_and_tail_work(programs, waves):
+    from triton_viz.performance.gpu import expand
+    from triton_viz.performance.gpu_dot_precision import DOT_CLASSES, wave_dot_features
+
+    source = dict(
+        schema="triton-viz.gpu-source.v1",
+        num_warps=8,
+        num_stages=2,
+        program_count=programs,
+        events=[],
+    )
+    features = expand(source, sm_count=48)["features"]
+    features.update(
+        {
+            f"program_dot_p90_{kind}": 1024 * (i + 1)
+            for i, kind in enumerate(DOT_CLASSES)
+        }
+    )
+    result = wave_dot_features(features)
+    assert result == {
+        f"wave_dot_flops_{kind}": waves * 1024 * (i + 1)
+        for i, kind in enumerate(DOT_CLASSES)
+    }
+
+
+@pytest.mark.parametrize(
     "dtype,precision,kind",
     [
         ("float32", "ieee", "ieee_fp32"),
