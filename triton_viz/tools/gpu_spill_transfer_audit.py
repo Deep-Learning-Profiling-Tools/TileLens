@@ -12,6 +12,33 @@ FEATURES = FEATURE_SETS["initial_layout"]
 OPS = ("LDL", "STL")
 
 
+def request_candidates(training, source, *, separate_single_dot=False):
+    """Exact precision and optional single/repeated source-work support.
+
+    One observed dot cannot carry loop-back repeated-dot work. This does not
+    claim repeated dynamic dots share one static compiler loop. If a declared
+    stratum is absent, retain a prediction but explicitly mark the extrapolation.
+    """
+    candidates = [
+        r for r in training if r["source_precision"] == source["source_precision"]
+    ]
+    if not candidates:
+        raise ValueError("Unseen counter precision; no point deletion")
+    reasons = []
+    if separate_single_dot:
+        single = source["source_features"]["dots_per_program"] == 1
+        same = [
+            r
+            for r in candidates
+            if (r["source_features"]["dots_per_program"] == 1) == single
+        ]
+        if same:
+            candidates = same
+        else:
+            reasons.append("counter_unseen_single_or_repeated_dot_regime")
+    return candidates, reasons
+
+
 def dot_instructions(row):
     """Conditional pinned pure-dot expansion per thread, per source dot.
 
@@ -58,7 +85,7 @@ def dot_instructions(row):
 
 
 def validate(rows, *, normalization):
-    if normalization not in {"dot", "instruction"}:
+    if normalization not in {"dot", "instruction", "instruction_regime"}:
         raise ValueError("Unknown normalization")
     if not rows or any(r.get("role") != "control" for r in rows):
         raise ValueError("Require control rows only")
@@ -87,7 +114,7 @@ def validate(rows, *, normalization):
 
     def scale(row):
         return row["source_features"]["dots_per_program"] * (
-            dot_instructions(row) if normalization == "instruction" else 1
+            dot_instructions(row) if normalization != "dot" else 1
         )
 
     results = []
@@ -103,11 +130,9 @@ def validate(rows, *, normalization):
         for row in rows:
             if row["case"]["cv_group"] != held:
                 continue
-            candidates = [
-                r for r in training if r["source_precision"] == row["source_precision"]
-            ]
-            if not candidates:
-                raise ValueError("Unseen precision; all controls retained")
+            candidates, regime_reasons = request_candidates(
+                training, row, separate_single_dot=normalization == "instruction_regime"
+            )
             distances = [
                 sum(
                     abs(row["source_features"][k] - r["source_features"][k]) / (hi - lo)
@@ -134,7 +159,8 @@ def validate(rows, *, normalization):
                     / 32,
                     training_ids=[r["case"]["id"] for r in training],
                     neighbors=[r["case"]["id"] for r in nearest],
-                    ood_reasons=[
+                    ood_reasons=regime_reasons
+                    + [
                         f"outside_training_domain:{k}"
                         for k, (lo, hi) in domain.items()
                         if not lo <= row["source_features"][k] <= hi

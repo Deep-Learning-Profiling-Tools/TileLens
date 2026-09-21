@@ -5,6 +5,7 @@ import pytest
 from triton_viz.tools.gpu_spill_transfer_audit import (
     FEATURES,
     dot_instructions,
+    request_candidates,
     validate,
 )
 
@@ -47,7 +48,7 @@ def test_pinned_source_instruction_units():
         dot_instructions(row)
 
 
-@pytest.mark.parametrize("normalization", ["dot", "instruction"])
+@pytest.mark.parametrize("normalization", ["dot", "instruction", "instruction_regime"])
 def test_held_counter_labels_cannot_change_prediction(normalization):
     rows = controls()
     first = validate(rows, normalization=normalization)
@@ -64,6 +65,18 @@ def test_held_counter_labels_cannot_change_prediction(normalization):
     for row in first["rows"]:
         assert row["case"]["id"] not in row["training_ids"]
         assert set(row["neighbors"]) <= set(row["training_ids"])
+
+
+def test_single_dot_support_is_source_defined_and_missing_regime_is_ood():
+    training = controls()
+    source = copy.deepcopy(training[0])
+    source["source_features"]["dots_per_program"] = 1
+    same, reasons = request_candidates(training, source, separate_single_dot=True)
+    assert same == training
+    assert reasons == ["counter_unseen_single_or_repeated_dot_regime"]
+    training[3]["source_features"]["dots_per_program"] = 1
+    same, reasons = request_candidates(training, source, separate_single_dot=True)
+    assert same == [training[3]] and not reasons
 
 
 def test_all_zero_traffic_not_deleted_or_epsilon_divided():

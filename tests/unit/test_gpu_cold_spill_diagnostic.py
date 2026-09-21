@@ -47,15 +47,16 @@ def data():
     return counters, latencies
 
 
-def test_outer_counter_and_timing_labels_cannot_affect_selection():
+@pytest.mark.parametrize("include_regime", [False, True])
+def test_outer_counter_and_timing_labels_cannot_affect_selection(include_regime):
     counters, latencies = data()
-    first = validate(counters, latencies)
+    first = validate(counters, latencies, include_regime=include_regime)
     changed_c, changed_l = copy.deepcopy((counters, latencies))
     changed_c[0]["counter_bytes_per_thread"] = dict(LDL=999999, STL=999999)
     for row in changed_l:
         if row["case"]["cv_group"] == "0":
             row["latency_us"] = 999999
-    second = validate(changed_c, changed_l)
+    second = validate(changed_c, changed_l, include_regime=include_regime)
     assert first["folds"][0] == second["folds"][0]
     for name in first["ordinary"]:
         assert [

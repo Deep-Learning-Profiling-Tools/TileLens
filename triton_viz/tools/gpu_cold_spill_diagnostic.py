@@ -12,12 +12,17 @@ from triton_viz.tools.gpu_cold_resource_diagnostic import (
     service_model,
     service_prediction,
 )
-from triton_viz.tools.gpu_spill_transfer_audit import FEATURES, OPS, dot_instructions
+from triton_viz.tools.gpu_spill_transfer_audit import (
+    FEATURES,
+    OPS,
+    dot_instructions,
+    request_candidates,
+)
 
 REQUESTS = tuple("predicted_wave_" + op for op in OPS)
 
 
-def request_prediction(training, source):
+def request_prediction(training, source, *, separate_single_dot=False):
     if not training or any(r.get("role") != "control" for r in training):
         raise ValueError("Require nonempty control counter training")
     domain = {
@@ -27,11 +32,9 @@ def request_prediction(training, source):
         )
         for k in FEATURES
     }
-    candidates = [
-        r for r in training if r["source_precision"] == source["source_precision"]
-    ]
-    if not candidates:
-        raise ValueError("Unseen counter precision; no point deletion")
+    candidates, regime_reasons = request_candidates(
+        training, source, separate_single_dot=separate_single_dot
+    )
     distances = [
         sum(
             abs(source["source_features"][k] - r["source_features"][k]) / (hi - lo)
@@ -57,7 +60,8 @@ def request_prediction(training, source):
     }
     return dict(
         bytes_per_thread=predicted,
-        ood_reasons=[
+        ood_reasons=regime_reasons
+        + [
             f"counter_domain:{k}"
             for k, (lo, hi) in domain.items()
             if not lo <= source["source_features"][k] <= hi
@@ -65,7 +69,7 @@ def request_prediction(training, source):
     )
 
 
-def validate(counter_rows, latency_rows):
+def validate(counter_rows, latency_rows, *, include_regime=False):
     shape_groups = {}
     for rows in (counter_rows, latency_rows):
         if not rows or any(r.get("role") != "control" for r in rows):
@@ -109,6 +113,8 @@ def validate(counter_rows, latency_rows):
     if len(groups) < 3:
         raise ValueError("Need three geometry groups")
     names = ("source", "source_pure", "source_plus_requests")
+    if include_regime:
+        names += ("source_plus_regime_requests",)
     cache = {}
 
     def fold(excluded):
@@ -120,7 +126,13 @@ def validate(counter_rows, latency_rows):
         for row in latency_rows:
             pure = row["case"]["kind"] == "geometry_dot"
             result = request_prediction(counters, row) if pure else None
+            regime = (
+                request_prediction(counters, row, separate_single_dot=True)
+                if pure and include_regime
+                else None
+            )
             features = {k: row["pricing_features"][k] for k in SERVICE_FEATURES}
+            regime_features = features.copy()
             if pure:
                 for op, k in zip(OPS, REQUESTS):
                     features[k] = (
@@ -129,12 +141,23 @@ def validate(counter_rows, latency_rows):
                         / 32
                         * row["pricing_features"]["waves"]
                     )
+                    if regime is not None:
+                        regime_features[k] = (
+                            regime["bytes_per_thread"][op]
+                            * row["source_features"]["threads_per_program"]
+                            / 32
+                            * row["pricing_features"]["waves"]
+                        )
             projected.append(
                 dict(
                     id=row["case"]["id"],
                     group=row["case"]["cv_group"],
                     pure=pure,
                     features=features,
+                    regime_features=regime_features,
+                    regime_ood=regime["ood_reasons"]
+                    if regime
+                    else ["spill_mapping_unmodeled_composition"],
                     latency_us=row["latency_us"],
                     counter_ood=result["ood_reasons"]
                     if pure
@@ -150,6 +173,11 @@ def validate(counter_rows, latency_rows):
                 pure_training, SERVICE_FEATURES + REQUESTS
             ),
         }
+        if include_regime:
+            models["source_plus_regime_requests"] = service_model(
+                [{**r, "features": r["regime_features"]} for r in pure_training],
+                SERVICE_FEATURES + REQUESTS,
+            )
         predictions = {name: [] for name in names}
         for row in projected:
             if row["group"] not in excluded:
@@ -157,9 +185,14 @@ def validate(counter_rows, latency_rows):
             for name in names:
                 fallback = name != "source" and not row["pure"]
                 predicted = service_prediction(
-                    models["source" if fallback else name], row["features"]
+                    models["source" if fallback else name],
+                    row["regime_features"]
+                    if name == "source_plus_regime_requests"
+                    else row["features"],
                 )
-                if name == "source_plus_requests" or fallback:
+                if name == "source_plus_regime_requests":
+                    predicted["ood_reasons"] += row["regime_ood"]
+                elif name == "source_plus_requests" or fallback:
                     predicted["ood_reasons"] += row["counter_ood"]
                 predictions[name].append(
                     dict(
@@ -226,5 +259,15 @@ def validate(counter_rows, latency_rows):
         nested_mape_pct=mape(nested),
         nested_rows=nested,
         folds=folds,
+        solver_audit=[
+            dict(
+                excluded_groups=list(excluded),
+                model_solvers={
+                    name: model["solver"]
+                    for name, model in result["diagnostic_models"].items()
+                },
+            )
+            for excluded, result in sorted(cache.items())
+        ],
         caveat="Request service diagnostic, not cache misses or an admitted latency model. Compositions use explicit source fallback; all controls retained. No target artifacts.",
     )
