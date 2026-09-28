@@ -1,0 +1,147 @@
+"""Adapt cuTile interpreter operations to the shared tracing callbacks."""
+
+from collections.abc import Callable
+from typing import Any
+
+import numpy as np
+
+from triton_viz.core.data import Dot, Load, Op, ProgramId, ReduceSum, Store
+
+from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
+
+
+HAS_CUTILE = False
+cutile_builder = None
+try:
+    from triton_viz.core.simulation.cutile import (
+        Array,
+        Tile,
+        _tile_access,
+        _tile_value,
+        cutile_builder,
+    )
+
+    HAS_CUTILE = True
+except ModuleNotFoundError:
+    pass
+
+
+def _cutile_memory_adapter(
+    array: Any,
+    index: Any,
+    shape: Any,
+    order: Any = "C",
+    traversal_steps: Any = None,
+) -> AdapterResult:
+    assert HAS_CUTILE
+    _, axes, access_shape, starts = _tile_access(
+        array, index, shape, order, traversal_steps
+    )
+    root = array
+    while root._parent is not None:
+        root = root._parent
+    keys = [None] * array.ndim
+    mask = np.ones(access_shape, dtype=bool)
+    for axis, (start, size, array_axis) in enumerate(zip(starts, access_shape, axes)):
+        coordinates = start + np.arange(size)
+        broadcast_shape = [1] * array.ndim
+        broadcast_shape[axis] = size
+        coordinates = coordinates.reshape(broadcast_shape)
+        keys[array_axis] = Tile(coordinates + array._origin[array_axis])
+        mask &= (coordinates >= 0) & (coordinates < array.shape[array_axis])
+    return AdapterResult(root, Tile(mask), tuple(keys))
+
+
+def _cutile_load_adapter(
+    array: Any,
+    index: Any,
+    shape: Any,
+    *,
+    order: Any = "C",
+    traversal_steps: Any = None,
+    **kwargs: Any,
+) -> AdapterResult:
+    return _cutile_memory_adapter(array, index, shape, order, traversal_steps)
+
+
+def _cutile_store_adapter(
+    array: Any,
+    index: Any,
+    tile: Any,
+    *,
+    order: Any = "C",
+    traversal_steps: Any = None,
+    **kwargs: Any,
+) -> AdapterResult:
+    assert HAS_CUTILE
+    return _cutile_memory_adapter(
+        array, index, _tile_value(tile).shape, order, traversal_steps
+    )
+
+
+def _cutile_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    assert HAS_CUTILE
+    # Give visualization consumers writable snapshots; interpreter tiles remain
+    # immutable, while the visualizer may convert these arrays to Torch tensors.
+    return AdapterResult(Array(x.data.copy()), Array(y.data.copy()))
+
+
+def _cutile_reduce_sum_adapter(
+    input_tensor: Any,
+    axis: Any = None,
+    *,
+    keepdims: bool = False,
+    **kwargs: Any,
+) -> AdapterResult:
+    return AdapterResult(input_tensor, axis, keepdims)
+
+
+CUTILE_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
+CUTILE_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
+if HAS_CUTILE:
+    assert cutile_builder is not None
+
+    CUTILE_NAMESPACES = {
+        cutile_builder: {
+            "bid": ProgramId,
+            "load": Load,
+            "store": Store,
+            "matmul": Dot,
+            "sum": ReduceSum,
+        }
+    }
+
+    CUTILE_ADAPTERS = {
+        ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
+        Load: _cutile_load_adapter,
+        Store: _cutile_store_adapter,
+        Dot: _cutile_dot_adapter,
+        ReduceSum: _cutile_reduce_sum_adapter,
+    }
+
+
+class CuTileFrontend(Frontend):
+    def __init__(self) -> None:
+        definition = Frontend.from_namespaces(
+            name="cutile",
+            builder=cutile_builder,
+            namespaces=CUTILE_NAMESPACES,
+            adapters=CUTILE_ADAPTERS,
+        )
+        super().__init__(
+            name=definition.name,
+            builder=definition.builder,
+            original_ops=definition.original_ops,
+            adapters=definition.adapters,
+            namespaces=definition.namespaces,
+        )
+
+    def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
+        from triton_viz.core.simulation.cutile import cutile_patch_lang
+
+        scope = _LangPatchScope()
+        cutile_patch_lang(scope)
+        return scope
+
+
+frontend = register_frontend(CuTileFrontend())

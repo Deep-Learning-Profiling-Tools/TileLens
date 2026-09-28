@@ -54,6 +54,7 @@ triton-race-detector = "triton_viz.wrapper:apply_race_detector"
 triton-visualizer = "triton_viz.visualizer_cli:main"
 
 [project.optional-dependencies]
+cutile = ["cuda-tile==1.5.0", "numpy"]
 test = [
   "pytest",
   "pytest-xdist",
