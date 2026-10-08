@@ -630,6 +630,9 @@ def record_to_event(
             ),
             "input_dtypes": list(record.input_dtypes),
             "output_dtype": record.output_dtype,
+            **({"input_memories": list(record.attrs["input_memories"]),
+                "output_memory": record.attrs.get("output_memory")}
+               if "input_memories" in record.attrs else {}),
             "compute_mask_provided": bool(
                 record.attrs.get("compute_mask_provided", False)
             ),

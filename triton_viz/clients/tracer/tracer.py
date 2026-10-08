@@ -412,6 +412,15 @@ class Tracer(Client):
                 input_dtypes=input_dtypes,
                 output_dtype=output_dtype,
                 attrs={
+                    # Explicit interpreter types, never a default from pointer
+                    # values or the engine executing this operation.
+                    "input_memories": tuple(
+                        x.buffer if getattr(x, "buffer", None) in {"sbuf", "psum", "hbm"} else None
+                        for x in inputs
+                    ),
+                    "output_memory": (
+                        ret.buffer if getattr(ret, "buffer", None) in {"sbuf", "psum", "hbm"} else None
+                    ),
                     "compute_mask_provided": bool(
                         getattr(ret, "_nki_compute_mask_provided", False)
                     )

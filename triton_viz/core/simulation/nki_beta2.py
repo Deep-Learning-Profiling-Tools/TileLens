@@ -1043,6 +1043,22 @@ def tensor_reduce(
     return result
 
 
+def memset(dst: NDArray, value: Any, engine: Any = nisa.engine.unknown,
+           name: str | None = None) -> NDArray:
+    """Initialize an explicitly typed on-chip destination and record the write."""
+    del name
+    _require(dst.buffer in ("sbuf", "psum"), "memset requires an explicit SBUF/PSUM destination")
+    _require(engine in (nisa.engine.unknown, nisa.engine.vector),
+             "memset interpreter supports Vector/default engine only")
+    scalar = np.asarray(value)
+    _require(scalar.ndim == 0, "memset requires a scalar value")
+    result = _store(dst, np.full(dst.shape, scalar.item(), dtype=dst.dtype))
+    result._nki_api = "memset"
+    result._nki_engine = "vector"
+    result._nki_inputs = ()
+    return result
+
+
 def tensor_scalar(
     dst: NDArray,
     data: NDArray,
@@ -1282,6 +1298,10 @@ def nki_patch_lang(scope: Any = None) -> None:
     set_attr(nl, "multiply", SubOp(np.multiply, False, True))
     set_attr(nl, "maximum", SubOp(np.maximum, False, True))
     set_attr(nl, "minimum", SubOp(np.minimum, False, True))
+    set_attr(nl, "max", SubOp(np.maximum, False, True, name="maximum"))
+    set_attr(nl, "min", SubOp(np.minimum, False, True, name="minimum"))
+    set_attr(nl, "relu", SubOp(lambda value: np.maximum(value, 0.), False, False, name="relu"))
+    set_attr(nl, "greater_equal", SubOp(np.greater_equal, False, False, name="greater_equal"))
     set_attr(nl, "power", SubOp(np.power, False, False))
     set_attr(nl, "logical_and", SubOp(np.logical_and, True, True))
     set_attr(nl, "logical_or", SubOp(np.logical_or, True, True))
@@ -1313,6 +1333,7 @@ def nki_patch_lang(scope: Any = None) -> None:
     set_attr(nisa, "tensor_tensor", tensor_tensor)
     set_attr(nisa, "tensor_reduce", tensor_reduce)
     set_attr(nisa, "tensor_scalar", tensor_scalar)
+    set_attr(nisa, "memset", memset)
 
 
 def nki_unpatch_lang(scope: Any = None) -> None:
