@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from triton_viz.tools.nki_features import AccessPattern, ComputeRegion
+from triton_viz.tools.nki_tensor_tile_geometry import TensorTileGeometryCalibration
 
 # ---------------------------------------------------------------------------
 # Engine model
@@ -1476,6 +1477,9 @@ class CostModel:
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
     tensor_dot_count_calibration: TensorDotCountCalibration | None = None
+    # Opt-in geometry response. Its coefficients describe homogeneous reference
+    # controls; nonreference geometry is reported explicitly, never as a bound.
+    tensor_tile_geometry_calibration: TensorTileGeometryCalibration | None = None
     attention_pipeline_calibration: AttentionPipelineCalibration | None = None
     dma_elapsed_calibration: DmaElapsedCalibration | None = None
     onchip_transfer_calibration: OnChipTransferCalibration | None = None
@@ -1608,6 +1612,10 @@ class CostModel:
         op = event.get("op")
         engine = _canonical_engine(event.get("engine", ""), op or "")
         if op == "dot":
+            if self.tensor_tile_geometry_calibration is not None:
+                if "tensor_tile_geometry_work_ns" in event:
+                    return float(event["tensor_tile_geometry_work_ns"])
+                return self.tensor_tile_geometry_calibration.isolated_work_ns(event)
             flops = event.get("flops") or 0
             source_dot_count = int(event.get("tensor_source_dot_count") or 0)
             if self.tensor_dot_count_calibration is not None and source_dot_count > 0:
@@ -2374,7 +2382,11 @@ def simulate(
     The result is a predicted end-to-end latency plus per-engine timelines.
     """
     model = cost_model or CostModel()
-    source_events = list(events)
+    source_events = [dict(event) for event in events]
+    tensor_tile_geometry_summary = (
+        model.tensor_tile_geometry_calibration.assign_events(source_events)
+        if model.tensor_tile_geometry_calibration is not None else None
+    )
     routing_events = (
         list(routing_source_events)
         if routing_source_events is not None
@@ -2448,10 +2460,16 @@ def simulate(
         if _canonical_engine(event.get("engine", ""), event.get("op"))
         == ENGINE_TENSOR
     ]
-    tensor_startup_ns = 0.0
+    tensor_startup_ns = (
+        tensor_tile_geometry_summary["startup_ns"]
+        if tensor_tile_geometry_summary is not None else 0.0
+    )
     attention_pipeline_match = "disabled"
     tensor_domain_ood = 0
-    tensor_geometry_ood = 0
+    tensor_geometry_ood = (
+        tensor_tile_geometry_summary["nonreference_dot_events"]
+        if tensor_tile_geometry_summary is not None else 0
+    )
     micro_dag_engine_coverage: set[str] = set()
     source_compute_regions = {
         str(event.get("source_region_id") or event.get("fusion_group"))
@@ -2483,7 +2501,7 @@ def simulate(
         micro_dag_unsupported_engine_events += len(
             event.get("micro_dag_unsupported_engines") or ()
         )
-    if model.tensor_calibration is not None:
+    if model.tensor_calibration is not None and tensor_tile_geometry_summary is None:
         calibrated_dot_events = [
             event for event in tensor_events if event.get("op") == "dot"
         ]
@@ -2926,6 +2944,11 @@ def simulate(
             ),
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
             "tensor_flops_domain_ood_count": float(tensor_domain_ood),
+            "tensor_tile_geometry_enabled": float(tensor_tile_geometry_summary is not None),
+            "tensor_tile_geometry_dot_units": float(
+                (tensor_tile_geometry_summary or {}).get("dot_units", 0)
+            ),
+            "tensor_tile_geometry_transport_validated": 0.0,
             "tensor_source_geometry_ood_count": float(tensor_geometry_ood),
             "micro_dag_vector_covered": float(
                 ENGINE_VECTOR in micro_dag_engine_coverage
