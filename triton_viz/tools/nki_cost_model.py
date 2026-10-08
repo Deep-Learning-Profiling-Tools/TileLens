@@ -1482,6 +1482,9 @@ class CostModel:
     # controls; nonreference geometry is reported explicitly, never as a bound.
     tensor_tile_geometry_calibration: TensorTileGeometryCalibration | None = None
     tensor_initiation_calibration: TensorInitiationCalibration | None = None
+    # Opt-in experimentally validated shared execution resources. Event bindings
+    # require explicit provenance; names alone do not establish hardware ports.
+    exclusive_execution_resources: tuple[str, ...] = ()
     attention_pipeline_calibration: AttentionPipelineCalibration | None = None
     dma_elapsed_calibration: DmaElapsedCalibration | None = None
     onchip_transfer_calibration: OnChipTransferCalibration | None = None
@@ -2642,6 +2645,10 @@ def simulate(
     # Running high-water mark of all memory-transfer completions, used as a
     # conservative dependency floor for compute ops that lack pointer linkage.
     prior_transfer_end = 0.0
+    resource_free = {name: 0.0 for name in model.exclusive_execution_resources}
+    if len(resource_free) != len(model.exclusive_execution_resources):
+        raise ValueError('unique exclusive execution resources required')
+    resource_wait_ns = 0.0
 
     def _dep(
         earliest: float,
@@ -2752,12 +2759,23 @@ def simulate(
             # memory transfers issued so far (older traces without Dot pointers).
             earliest = max(earliest, prior_transfer_end + (sync_ns if sync_ns else 0.0))
 
+        resources = ()
+        if resource_free:
+            resources = event.get('execution_resources')
+            if not isinstance(resources, (list, tuple)) or any(
+                    name not in resource_free for name in resources):
+                raise ValueError('explicit valid execution-resource annotation required')
+            before_resource = earliest
+            earliest = max([earliest] + [resource_free[name] for name in resources])
+            resource_wait_ns += earliest - before_resource
         start = earliest
         issue_end = start + duration
         end = issue_end + float(event.get("tensor_pipeline_ready_tail_ns") or 0.)
 
         for slot_index in slot_indices:
             slots[slot_index] = issue_end
+        for name in resources:
+            resource_free[name] = issue_end
 
         # Publish this op's effects for downstream dependency resolution.
         for key, version, _ptr, lo, hi in reads:
@@ -3024,6 +3042,10 @@ def simulate(
                 )
             },
             "final": final_ns,
+            **({"exclusive_resource_wait_ns": resource_wait_ns,
+                "exclusive_resource_groups": float(len(resource_free)),
+                "exclusive_resource_hardware_validated": 0.0}
+               if resource_free else {}),
         },
     )
 
