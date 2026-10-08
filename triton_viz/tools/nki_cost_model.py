@@ -30,6 +30,7 @@ from typing import Any
 
 from triton_viz.tools.nki_features import AccessPattern, ComputeRegion
 from triton_viz.tools.nki_tensor_tile_geometry import TensorTileGeometryCalibration
+from triton_viz.tools.nki_tensor_initiation import TensorInitiationCalibration
 
 # ---------------------------------------------------------------------------
 # Engine model
@@ -1480,6 +1481,7 @@ class CostModel:
     # Opt-in geometry response. Its coefficients describe homogeneous reference
     # controls; nonreference geometry is reported explicitly, never as a bound.
     tensor_tile_geometry_calibration: TensorTileGeometryCalibration | None = None
+    tensor_initiation_calibration: TensorInitiationCalibration | None = None
     attention_pipeline_calibration: AttentionPipelineCalibration | None = None
     dma_elapsed_calibration: DmaElapsedCalibration | None = None
     onchip_transfer_calibration: OnChipTransferCalibration | None = None
@@ -1612,6 +1614,8 @@ class CostModel:
         op = event.get("op")
         engine = _canonical_engine(event.get("engine", ""), op or "")
         if op == "dot":
+            if self.tensor_initiation_calibration is not None:
+                return self.tensor_initiation_calibration.timing(event)["initiation_ns"]
             if self.tensor_tile_geometry_calibration is not None:
                 if "tensor_tile_geometry_work_ns" in event:
                     return float(event["tensor_tile_geometry_work_ns"])
@@ -1635,6 +1639,8 @@ class CostModel:
                 return flops / flops_per_ns
             return self.tensor_startup_ns + flops / self.tensor_flops_per_ns
         if op == "tensor_transpose":
+            if self.tensor_initiation_calibration is not None:
+                return self.tensor_initiation_calibration.timing(event)["initiation_ns"]
             # Transpose FLOPs are an accounting proxy, not matmul arithmetic;
             # do not feed them through the independently fitted Dot surface.
             return (event.get("flops") or 0) / self.tensor_flops_per_ns
@@ -1705,6 +1711,7 @@ class TimelineEntry:
     engine: str
     start: float
     end: float
+    ready_end: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1714,6 +1721,7 @@ class TimelineEntry:
             "start": round(self.start, 3),
             "end": round(self.end, 3),
             "duration": round(self.end - self.start, 3),
+            **({"ready_end": round(self.ready_end, 3)} if self.ready_end is not None else {}),
         }
 
 
@@ -2383,6 +2391,13 @@ def simulate(
     """
     model = cost_model or CostModel()
     source_events = [dict(event) for event in events]
+    if model.tensor_initiation_calibration is not None and model.tensor_tile_geometry_calibration is not None:
+        raise ValueError("select one experimental Tensor response model")
+    tensor_pipeline_summary = (
+        model.tensor_initiation_calibration.assign_events(source_events)
+        if model.tensor_initiation_calibration is not None else None
+    )
+    tensor_issue_ends = {}
     tensor_tile_geometry_summary = (
         model.tensor_tile_geometry_calibration.assign_events(source_events)
         if model.tensor_tile_geometry_calibration is not None else None
@@ -2462,7 +2477,8 @@ def simulate(
     ]
     tensor_startup_ns = (
         tensor_tile_geometry_summary["startup_ns"]
-        if tensor_tile_geometry_summary is not None else 0.0
+        if tensor_tile_geometry_summary is not None else
+        tensor_pipeline_summary["startup_ns"] if tensor_pipeline_summary is not None else 0.0
     )
     attention_pipeline_match = "disabled"
     tensor_domain_ood = 0
@@ -2501,7 +2517,8 @@ def simulate(
         micro_dag_unsupported_engine_events += len(
             event.get("micro_dag_unsupported_engines") or ()
         )
-    if model.tensor_calibration is not None and tensor_tile_geometry_summary is None:
+    if (model.tensor_calibration is not None and tensor_tile_geometry_summary is None
+            and tensor_pipeline_summary is None):
         calibrated_dot_events = [
             event for event in tensor_events if event.get("op") == "dot"
         ]
@@ -2718,7 +2735,14 @@ def simulate(
         for key, _version, _ptr, lo, hi in writes:
             for w_lo, w_hi, w_end, w_eng, _w_version in writers.get(key, ()):
                 if _ranges_overlap(lo, hi, w_lo, w_hi):
-                    earliest = _dep(earliest, w_end, w_eng, engine)
+                    forwarding = tensor_issue_ends.get((key, w_lo, w_hi, w_end))
+                    if (tensor_pipeline_summary is not None and op == "dot"
+                            and event.get("tensor_pipeline_accumulate") is True
+                            and w_eng == ENGINE_TENSOR and forwarding is not None
+                            and lo == w_lo and hi == w_hi):
+                        earliest = _dep(earliest, forwarding, w_eng, engine)
+                    else:
+                        earliest = _dep(earliest, w_end, w_eng, engine)
             for r_lo, r_hi, r_end, r_eng, _r_version in readers.get(key, ()):
                 if _ranges_overlap(lo, hi, r_lo, r_hi):
                     earliest = _dep(earliest, r_end, r_eng, engine)
@@ -2729,10 +2753,11 @@ def simulate(
             earliest = max(earliest, prior_transfer_end + (sync_ns if sync_ns else 0.0))
 
         start = earliest
-        end = start + duration
+        issue_end = start + duration
+        end = issue_end + float(event.get("tensor_pipeline_ready_tail_ns") or 0.)
 
         for slot_index in slot_indices:
-            slots[slot_index] = end
+            slots[slot_index] = issue_end
 
         # Publish this op's effects for downstream dependency resolution.
         for key, version, _ptr, lo, hi in reads:
@@ -2748,6 +2773,8 @@ def simulate(
                 for remainder in _subtract_interval(entry, lo, hi)
             ]
             writers[key].append((lo, hi, end, engine, version))
+            if tensor_pipeline_summary is not None and op == "dot":
+                tensor_issue_ends[(key, lo, hi, end)] = issue_end
             readers[key] = [
                 remainder
                 for entry in readers.get(key, ())
@@ -2762,7 +2789,8 @@ def simulate(
                 op=op,
                 engine=engine,
                 start=start,
-                end=end,
+                end=issue_end,
+                ready_end=end if tensor_pipeline_summary is not None else None,
             )
         )
         engine_busy[engine] = engine_busy.get(engine, 0.0) + duration
@@ -2860,7 +2888,7 @@ def simulate(
         model.global_completion_calibration.predict_ns(
             engine_busy, completion_partitions
         )
-        if model.global_completion_calibration is not None
+        if model.global_completion_calibration is not None and tensor_pipeline_summary is None
         else 0.0
     )
     final_ns = max(makespan_only_ns, global_completion_ns)
@@ -2945,6 +2973,9 @@ def simulate(
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
             "tensor_flops_domain_ood_count": float(tensor_domain_ood),
             "tensor_tile_geometry_enabled": float(tensor_tile_geometry_summary is not None),
+            "tensor_pipeline_enabled": float(tensor_pipeline_summary is not None),
+            "tensor_pipeline_busy_is_initiation_work": float(tensor_pipeline_summary is not None),
+            "tensor_pipeline_completion_transport_validated": 0.0,
             "tensor_tile_geometry_dot_units": float(
                 (tensor_tile_geometry_summary or {}).get("dot_units", 0)
             ),
