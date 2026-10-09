@@ -2992,6 +2992,7 @@ def simulate(
             "tensor_flops_domain_ood_count": float(tensor_domain_ood),
             "tensor_tile_geometry_enabled": float(tensor_tile_geometry_summary is not None),
             "tensor_pipeline_enabled": float(tensor_pipeline_summary is not None),
+            "tensor_pipeline_startup_ns": tensor_startup_ns if tensor_pipeline_summary is not None else 0.0,
             "tensor_pipeline_busy_is_initiation_work": float(tensor_pipeline_summary is not None),
             "tensor_pipeline_completion_transport_validated": 0.0,
             "tensor_tile_geometry_dot_units": float(
