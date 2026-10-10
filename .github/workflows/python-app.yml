@@ -46,7 +46,7 @@ jobs:
     - name: Install Dependencies
       run: |
         cd tilelens
-        uv sync --extra test
+        uv sync --extra test --extra cutile
 
     - name: Upgrade Triton to latest from main
       run: |
@@ -68,7 +68,7 @@ jobs:
     - name: Install TileLens with NKI extras
       run: |
         cd tilelens
-        uv sync --extra test --extra nki
+        uv sync --extra test --extra nki --extra cutile
 
     - name: Upgrade Triton to latest from main (NKI)
       run: |
@@ -93,7 +93,7 @@ jobs:
         python-version: '3.12'
 
     - name: Install with pip
-      run: pip install ".[test]"
+      run: pip install ".[test,cutile]"
 
     - name: Verify installation
       working-directory: ${{ runner.temp }}

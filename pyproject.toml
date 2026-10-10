@@ -59,6 +59,7 @@ triton-race-detector = "tilelens.wrapper:apply_race_detector"
 triton-visualizer = "tilelens.visualizer_cli:main"
 
 [project.optional-dependencies]
+cutile = ["cuda-tile==1.5.0", "numpy"]
 test = [
   "pytest",
   "pytest-xdist",

@@ -16,6 +16,7 @@ STORAGE_DTYPES: dict[DTypeLike, np.dtype | None] = {
     "int8": np.dtype(np.int8),
     "int16": np.dtype(np.int16),
     "int32": np.dtype(np.int32),
+    "int64": np.dtype(np.int64),
     "uint8": np.dtype(np.uint8),
     "uint16": np.dtype(np.uint16),
     "uint32": np.dtype(np.uint32),
