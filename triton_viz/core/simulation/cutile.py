@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import builtins
 import inspect
 import itertools
 import operator
+import types
 from typing import Any
 
 import numpy as np
+
+from triton_viz.utils.dtypes import STORAGE_DTYPES
 
 try:
     import cuda.tile as ct
@@ -21,10 +25,59 @@ from ..frontend.base import get_frontend
 
 DTYPES = {
     ct.bool_: np.dtype(np.bool_),
-    ct.int32: np.dtype(np.int32),
-    ct.float32: np.dtype(np.float32),
+    ct.int8: STORAGE_DTYPES["int8"],
+    ct.uint8: STORAGE_DTYPES["uint8"],
+    ct.int16: STORAGE_DTYPES["int16"],
+    ct.int32: STORAGE_DTYPES["int32"],
+    ct.int64: STORAGE_DTYPES["int64"],
+    ct.float16: STORAGE_DTYPES["float16"],
+    ct.bfloat16: STORAGE_DTYPES["bfloat16"],
+    ct.float32: STORAGE_DTYPES["float32"],
+    ct.float64: STORAGE_DTYPES["float64"],
+    ct.float8_e4m3fn: STORAGE_DTYPES["float8_e4m3fn"],
+    ct.float8_e5m2: STORAGE_DTYPES["float8_e5m2"],
 }
 NUMPY_DTYPES = {dtype: token for token, dtype in DTYPES.items()}
+
+
+def _is_float(dtype):
+    return dtype.kind == "f" or dtype in (
+        DTYPES[ct.bfloat16],
+        DTYPES[ct.float8_e4m3fn],
+        DTYPES[ct.float8_e5m2],
+    )
+
+
+def _binary_values(x, y, force_float=False):
+    """Choose operand dtypes without NumPy's integer/float widening.
+
+    This implements only part of cuTile's dtype promotion rules.
+    """
+    x_value, y_value = _tile_value(x), _tile_value(y)
+    if isinstance(x, Tile) and isinstance(y, (bool, int, float)):
+        dtype = x_value.dtype
+        if isinstance(y, float) and not _is_float(dtype):
+            dtype = np.dtype(np.float32)
+    elif isinstance(y, Tile) and isinstance(x, (bool, int, float)):
+        dtype = y_value.dtype
+        if isinstance(x, float) and not _is_float(dtype):
+            dtype = np.dtype(np.float32)
+    elif x_value.dtype == y_value.dtype:
+        dtype = x_value.dtype
+    elif _is_float(x_value.dtype) or _is_float(y_value.dtype):
+        floats = [v.dtype for v in (x_value, y_value) if _is_float(v.dtype)]
+        dtype = max(floats, key=lambda d: d.itemsize)
+        if len(floats) == 2 and floats[0] != floats[1]:
+            dtype = np.dtype(
+                np.float64 if np.dtype(np.float64) in floats else np.float32
+            )
+    else:
+        dtype = np.result_type(x_value.dtype, y_value.dtype)
+    if force_float and not _is_float(dtype):
+        dtype = np.dtype(np.float32)
+    # Use float32 arithmetic for NumPy void storage dtypes.
+    compute_dtype = dtype if dtype.kind != "V" else np.dtype(np.float32)
+    return x_value.astype(compute_dtype), y_value.astype(compute_dtype), dtype
 
 
 def _normalize_shape(shape: Any) -> tuple:
@@ -33,6 +86,9 @@ def _normalize_shape(shape: Any) -> tuple:
 
 
 def _numpy_dtype(dtype):
+    # TF32 is a compute format. CPU interpretation uses float32 precision.
+    if dtype == ct.tfloat32:
+        return np.dtype(np.float32)
     return DTYPES[dtype]
 
 
@@ -51,11 +107,12 @@ def _normalize_axis(axis: int, ndim: int) -> int:
 
 
 def _normalize_order(order: Any, ndim: int) -> tuple[int, ...]:
-    axes = (
-        tuple(range(ndim))
-        if order == "C"
-        else (tuple(reversed(range(ndim))) if order == "F" else tuple(order))
-    )
+    if order == "C":
+        axes = tuple(range(ndim))
+    elif order == "F":
+        axes = tuple(reversed(range(ndim)))
+    else:
+        axes = tuple(order)
     if sorted(axes) != list(range(ndim)):
         raise ValueError("order must be a permutation of the array axes")
     return axes
@@ -91,6 +148,27 @@ def _tile_value(value):
     if isinstance(value, float):
         return np.asarray(value, dtype=np.float32)
     return np.asarray(value)
+
+
+def _indexed_access(array, indices, mask=None, check_bounds=True):
+    """Broadcast element indices and validity for gather/scatter and tracing."""
+    indices = indices if isinstance(indices, tuple) else (indices,)
+    if len(indices) != array.ndim:
+        raise ValueError("Index tuple must match array rank")
+    keys = np.broadcast_arrays(*(_tile_value(i) for i in indices))
+    if any(key.dtype.kind not in "iu" for key in keys):
+        raise TypeError("Array indices must be integer tiles or scalars")
+    valid = np.ones(keys[0].shape, dtype=bool)
+    if mask is not None:
+        valid &= np.broadcast_to(_tile_value(mask), valid.shape)
+    bounds = np.ones_like(valid)
+    for key, size in zip(keys, array.shape):
+        bounds &= (key >= 0) & (key < size)
+    if check_bounds:
+        valid &= bounds
+    elif np.any(valid & ~bounds):
+        raise IndexError("Out-of-bounds access with check_bounds=False")
+    return tuple(keys), valid
 
 
 class Tile:
@@ -200,6 +278,50 @@ class Tile:
 
     def __matmul__(self, other):
         return cutile_builder.matmul(self, other)
+
+    def __bool__(self):
+        if self.shape != ():
+            raise TypeError("Only scalar tiles can control Python branches")
+        return bool(self.data)
+
+    def __neg__(self):
+        return Tile(np.negative(self.data))
+
+    def __eq__(self, other):
+        return cutile_builder.equal(self, other)
+
+    def __ne__(self, other):
+        return cutile_builder.not_equal(self, other)
+
+    def __floordiv__(self, other):
+        return cutile_builder.floordiv(self, other)
+
+    def __rfloordiv__(self, other):
+        return cutile_builder.floordiv(other, self)
+
+    def __mod__(self, other):
+        return cutile_builder.mod(self, other)
+
+    def __rmod__(self, other):
+        return cutile_builder.mod(other, self)
+
+    def __xor__(self, other):
+        return cutile_builder.bitwise_xor(self, other)
+
+    def __lshift__(self, other):
+        return cutile_builder.bitwise_lshift(self, other)
+
+    def __rshift__(self, other):
+        return cutile_builder.bitwise_rshift(self, other)
+
+    def __rand__(self, other):
+        return cutile_builder.bitwise_and(other, self)
+
+    def __ror__(self, other):
+        return cutile_builder.bitwise_or(other, self)
+
+    def __rxor__(self, other):
+        return cutile_builder.bitwise_xor(other, self)
 
 
 class Array:
@@ -345,11 +467,12 @@ class Builder:
         """Create array and tile slices for one tile-space index."""
         array_slices, tile_slices = [], []
         for extent, start, size in zip(array_shape, starts, shape):
-            lo, hi = max(0, min(extent, start)), max(0, min(extent, start + size))
-            length = max(0, hi - lo)
-            offset = max(0, min(size, -start))
-            array_slices.append(slice(lo, lo + length))
-            tile_slices.append(slice(offset, offset + length))
+            array_start = max(0, min(extent, start))
+            array_stop = max(0, min(extent, start + size))
+            length = max(0, array_stop - array_start)
+            tile_start = max(0, min(size, -start))
+            array_slices.append(slice(array_start, array_start + length))
+            tile_slices.append(slice(tile_start, tile_start + length))
         return tuple(array_slices), tuple(tile_slices)
 
     def load(
@@ -365,6 +488,15 @@ class Builder:
         **kwargs,
     ):
         """Load a tile from a global array using a tile-space index."""
+        if shape is None:
+            keys, valid = _indexed_access(
+                array, index, kwargs.get("mask"), kwargs.get("check_bounds", True)
+            )
+            padding = _tile_value(kwargs.get("padding_value", 0))
+            value = np.broadcast_to(padding, valid.shape)
+            value = value.astype(array.data.dtype).copy()
+            value[valid] = array.data[tuple(key[valid] for key in keys)]
+            return Tile(value)
         shape, axes, access_shape, starts = _tile_access(
             array, index, shape, order, traversal_steps
         )
@@ -384,7 +516,7 @@ class Builder:
             }
             if padding_mode not in padding:
                 raise ValueError("Unsupported padding mode")
-            if padding_mode != ct.PaddingMode.ZERO and data.dtype.kind != "f":
+            if padding_mode != ct.PaddingMode.ZERO and not _is_float(data.dtype):
                 raise TypeError("Nonzero padding modes require a floating-point array")
             value = np.full(access_shape, padding[padding_mode], dtype=data.dtype)
         value[tile_slices] = data[array_slices]
@@ -394,6 +526,13 @@ class Builder:
         self, array, /, index, tile, *, order="C", traversal_steps=None, **kwargs
     ):
         """Store the in-bounds part of a tile into a global array."""
+        if kwargs.get("_indexed", False):
+            keys, valid = _indexed_access(
+                array, index, kwargs.get("mask"), kwargs.get("check_bounds", True)
+            )
+            value = np.broadcast_to(_tile_value(tile), valid.shape)
+            array.data[tuple(key[valid] for key in keys)] = value[valid]
+            return
         value = _tile_value(tile)
         _, axes, shape, starts = _tile_access(
             array, index, value.shape, order, traversal_steps
@@ -423,20 +562,13 @@ class Builder:
 
     @staticmethod
     def _binary(x, y, operation, force_float=False):
-        x = _tile_value(x)
-        y = _tile_value(y)
-        # Avoid NumPy's int32/float32 promotion to float64.
-        dtype = (
-            np.float32 if force_float or np.float32 in (x.dtype, y.dtype) else np.int32
-        )
-        return Tile(operation(x.astype(dtype), y.astype(dtype)))
+        x, y, dtype = _binary_values(x, y, force_float)
+        return Tile(operation(x, y).astype(dtype))
 
     @staticmethod
     def _compare(x, y, operation):
-        x = _tile_value(x)
-        y = _tile_value(y)
-        dtype = np.float32 if np.float32 in (x.dtype, y.dtype) else np.int32
-        return Tile(operation(x.astype(dtype), y.astype(dtype)))
+        x, y, _ = _binary_values(x, y)
+        return Tile(operation(x, y))
 
     def add(self, x, y, /, **kwargs):
         return self._binary(x, y, np.add)
@@ -523,9 +655,151 @@ class Builder:
     def matmul(self, x, y, /):
         return Tile(np.matmul(_tile_value(x), _tile_value(y)))
 
+    def floordiv(self, x, y, /):
+        return self._binary(x, y, np.floor_divide)
+
+    def mod(self, x, y, /):
+        return self._binary(x, y, np.remainder)
+
+    def equal(self, x, y, /):
+        return self._compare(x, y, np.equal)
+
+    def not_equal(self, x, y, /):
+        return self._compare(x, y, np.not_equal)
+
+    def bitwise_xor(self, x, y, /):
+        return self._binary(x, y, np.bitwise_xor)
+
+    def bitwise_lshift(self, x, y, /):
+        return self._binary(x, y, np.left_shift)
+
+    def bitwise_rshift(self, x, y, /):
+        return self._binary(x, y, np.right_shift)
+
+    def where(self, condition, x, y, /):
+        x, y, dtype = _binary_values(x, y)
+        return Tile(np.where(_tile_value(condition), x, y).astype(dtype))
+
+    def maximum(self, x, y, /, **kwargs):
+        return self._binary(x, y, np.maximum)
+
+    def minimum(self, x, y, /, **kwargs):
+        return self._binary(x, y, np.minimum)
+
+    @staticmethod
+    def _unary(x, operation):
+        value = _tile_value(x)
+        if not _is_float(value.dtype):
+            raise TypeError("Transcendental operations require floating-point tiles")
+        return Tile(
+            operation(
+                value.astype(np.float64 if value.dtype == np.float64 else np.float32)
+            ).astype(value.dtype)
+        )
+
+    def exp(self, x, /, **kwargs):
+        return self._unary(x, np.exp)
+
+    def exp2(self, x, /, **kwargs):
+        return self._unary(x, np.exp2)
+
+    def log(self, x, /, **kwargs):
+        return self._unary(x, np.log)
+
+    def rsqrt(self, x, /, **kwargs):
+        return self._unary(x, lambda value: 1 / np.sqrt(value))
+
+    def max(self, x, /, axis=None, *, keepdims=False, **kwargs):
+        return Tile(np.max(_tile_value(x), axis=axis, keepdims=keepdims))
+
+    def argmax(self, x, /, axis=None, *, keepdims=False):
+        return Tile(
+            np.asarray(
+                np.argmax(_tile_value(x), axis=axis, keepdims=keepdims), dtype=np.int32
+            )
+        )
+
+    def cumsum(self, x, /, axis=0, *, reverse=False, **kwargs):
+        value = _tile_value(x)
+        if reverse:
+            value = np.flip(value, axis)
+        result = np.cumsum(value, axis=axis, dtype=value.dtype)
+        return Tile(np.flip(result, axis) if reverse else result)
+
+    def cat(self, tiles, /, axis):
+        if len(tiles) != 2 or tiles[0].shape != tiles[1].shape:
+            raise ValueError("cat requires two tiles of the same shape")
+        return Tile(np.concatenate([_tile_value(tile) for tile in tiles], axis=axis))
+
+    def mma(self, x, y, /, acc, **kwargs):
+        accumulator = _tile_value(acc)
+        # Accumulate narrow integer/float inputs in the accumulator's format.
+        lhs = _tile_value(x).astype(accumulator.dtype)
+        rhs = _tile_value(y).astype(accumulator.dtype)
+        result = np.matmul(lhs, rhs) + accumulator
+        return Tile(result.astype(accumulator.dtype))
+
+    def gather(
+        self,
+        array,
+        indices,
+        /,
+        *,
+        mask=None,
+        padding_value=0,
+        check_bounds=True,
+        **kwargs,
+    ):
+        # Use load so gathers trigger the same tracing callbacks as tiled loads.
+        return self.load(
+            array,
+            indices,
+            None,
+            mask=mask,
+            padding_value=padding_value,
+            check_bounds=check_bounds,
+            **kwargs,
+        )
+
+    def scatter(
+        self, array, indices, value, /, *, mask=None, check_bounds=True, **kwargs
+    ):
+        return self.store(
+            array,
+            indices,
+            value,
+            _indexed=True,
+            mask=mask,
+            check_bounds=check_bounds,
+            **kwargs,
+        )
+
+    def atomic_add(self, array, indices, update, /, *, check_bounds=True, **kwargs):
+        """Sequential element updates, returning old values for repeated indices."""
+        keys, valid = _indexed_access(array, indices, check_bounds=check_bounds)
+        values = np.broadcast_to(_tile_value(update), valid.shape)
+        positions = tuple(key[valid] for key in keys)
+        offsets = np.ravel_multi_index(positions, array.shape)
+        if np.unique(offsets).size == offsets.size:
+            previous = self.gather(array, indices, check_bounds=check_bounds)
+            self.scatter(
+                array, indices, previous.data + values, check_bounds=check_bounds
+            )
+            return previous
+        old = np.zeros(valid.shape, dtype=array.data.dtype)
+        for position in np.ndindex(valid.shape):
+            if valid[position]:
+                key = tuple(int(index[position]) for index in keys)
+                previous = self.gather(array, key, check_bounds=False)
+                old[position] = previous.data
+                self.scatter(
+                    array, key, previous.data + values[position], check_bounds=False
+                )
+        return Tile(old)
+
 
 cutile_builder = Builder()
-# Compatibility with callers of the original standalone prototype.
+# Keep the old builder alias for existing callers.
 builder = cutile_builder
 
 
@@ -538,33 +812,59 @@ def cutile_patch_lang(scope=None):
         else:
             scope.set_attr(obj, name, value)
 
-    _set_attr(ct, "bid", cutile_builder.bid)
-    _set_attr(ct, "load", cutile_builder.load)
-    _set_attr(ct, "store", cutile_builder.store)
-    _set_attr(ct, "full", cutile_builder.full)
-    _set_attr(ct, "add", cutile_builder.add)
-    _set_attr(ct, "sub", cutile_builder.sub)
-    _set_attr(ct, "mul", cutile_builder.mul)
-    _set_attr(ct, "truediv", cutile_builder.truediv)
-    _set_attr(ct, "less", cutile_builder.less)
-    _set_attr(ct, "greater", cutile_builder.greater)
-    _set_attr(ct, "less_equal", cutile_builder.less_equal)
-    _set_attr(ct, "greater_equal", cutile_builder.greater_equal)
-    _set_attr(ct, "bitwise_and", cutile_builder.bitwise_and)
-    _set_attr(ct, "bitwise_or", cutile_builder.bitwise_or)
-    _set_attr(ct, "reshape", cutile_builder.reshape)
-    _set_attr(ct, "astype", cutile_builder.astype)
-    _set_attr(ct, "sum", cutile_builder.sum)
-    _set_attr(ct, "matmul", cutile_builder.matmul)
-    _set_attr(ct, "zeros", cutile_builder.zeros)
-    _set_attr(ct, "ones", cutile_builder.ones)
-    _set_attr(ct, "arange", cutile_builder.arange)
-    _set_attr(ct, "num_tiles", cutile_builder.num_tiles)
-    _set_attr(ct, "broadcast_to", cutile_builder.broadcast_to)
-    _set_attr(ct, "permute", cutile_builder.permute)
-    _set_attr(ct, "transpose", cutile_builder.transpose)
-    _set_attr(ct, "expand_dims", cutile_builder.expand_dims)
-    _set_attr(ct, "extract", cutile_builder.extract)
+    for name in (
+        "bid",
+        "load",
+        "store",
+        "full",
+        "add",
+        "sub",
+        "mul",
+        "truediv",
+        "less",
+        "greater",
+        "less_equal",
+        "greater_equal",
+        "bitwise_and",
+        "bitwise_or",
+        "reshape",
+        "astype",
+        "sum",
+        "matmul",
+        "zeros",
+        "ones",
+        "arange",
+        "num_tiles",
+        "broadcast_to",
+        "permute",
+        "transpose",
+        "expand_dims",
+        "extract",
+        "floordiv",
+        "mod",
+        "equal",
+        "not_equal",
+        "bitwise_xor",
+        "bitwise_lshift",
+        "bitwise_rshift",
+        "where",
+        "maximum",
+        "minimum",
+        "exp",
+        "exp2",
+        "log",
+        "rsqrt",
+        "max",
+        "argmax",
+        "cumsum",
+        "cat",
+        "mma",
+        "gather",
+        "scatter",
+        "atomic_add",
+    ):
+        _set_attr(ct, name, getattr(cutile_builder, name))
+    _set_attr(ct, "static_iter", iter)
 
 
 def cutile_unpatch_lang(scope=None):
@@ -580,6 +880,33 @@ class CuTileInterpretedFunction:
         # @ct.kernel stores the original Python function in _pyfunc.
         self.fn = fn._pyfunc if isinstance(fn, ct.kernel) else fn
 
+    def _execution_function(self):
+        """Handle elementwise min/max in the kernel's globals."""
+        namespace = self.fn.__globals__.copy()
+
+        def tile_minmax(name, operation):
+            original = namespace.get(name, getattr(builtins, name))
+            # A kernel may intentionally shadow a builtin with a helper.
+            if original is not getattr(builtins, name):
+                return original
+
+            def wrapped(*args, **kwargs):
+                if len(args) == 2 and any(isinstance(arg, Tile) for arg in args):
+                    return operation(*args, **kwargs)
+                return original(*args, **kwargs)
+
+            return wrapped
+
+        namespace["max"] = tile_minmax("max", cutile_builder.maximum)
+        namespace["min"] = tile_minmax("min", cutile_builder.minimum)
+        return types.FunctionType(
+            self.fn.__code__,
+            namespace,
+            self.fn.__name__,
+            self.fn.__defaults__,
+            self.fn.__closure__,
+        )
+
     def run(self, *args, grid=(1,), client_manager=None, **kwargs) -> None:
         grid_dims = (grid,) if isinstance(grid, int) else tuple(grid)
         if not 1 <= len(grid_dims) <= 3 or any(
@@ -588,6 +915,7 @@ class CuTileInterpretedFunction:
             raise ValueError(
                 "cuTile grid must contain one to three nonnegative integers"
             )
+        grid_dims += (1,) * (3 - len(grid_dims))
         cutile_builder.set_grid_dim(*grid_dims)
 
         # Wrap NumPy arguments without copying their data.
@@ -602,7 +930,7 @@ class CuTileInterpretedFunction:
             bound.apply_defaults()
             for name, arg in bound.arguments.items():
                 client_manager.arg_callback(name, arg, arg)
-            client_manager.grid_callback(grid_dims + (1,) * (3 - len(grid_dims)))
+            client_manager.grid_callback(grid_dims)
 
         # Traced execution is already patched by ClientManager.patch_run().
         # Standalone execution uses the same frontend hook without clients.
@@ -612,15 +940,15 @@ class CuTileInterpretedFunction:
             else None
         )
         try:
+            execution_fn = self._execution_function()
+            execution_fn.__kwdefaults__ = self.fn.__kwdefaults__
             for grid_idx in itertools.product(*(range(dim) for dim in grid_dims)):
                 cutile_builder.set_grid_idx(*grid_idx)
                 if client_manager is not None:
-                    client_manager.grid_idx_callback(
-                        grid_idx + (0,) * (3 - len(grid_idx))
-                    )
+                    client_manager.grid_idx_callback(grid_idx)
                     if not client_manager.pre_run_callback(self.fn):
                         return
-                self.fn(*args, **kwargs)
+                execution_fn(*args, **kwargs)
                 if client_manager is not None:
                     if not client_manager.post_run_callback(self.fn):
                         return

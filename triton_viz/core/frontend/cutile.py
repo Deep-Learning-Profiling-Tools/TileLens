@@ -16,6 +16,7 @@ try:
     from triton_viz.core.simulation.cutile import (
         Array,
         Tile,
+        _indexed_access,
         _tile_access,
         _tile_value,
         cutile_builder,
@@ -55,34 +56,63 @@ def _cutile_memory_adapter(
 def _cutile_load_adapter(
     array: Any,
     index: Any,
-    shape: Any,
+    shape: Any = None,
     *,
     order: Any = "C",
     traversal_steps: Any = None,
     **kwargs: Any,
 ) -> AdapterResult:
+    if shape is None:
+        return _cutile_indexed_adapter(
+            array, index, kwargs.get("mask"), kwargs.get("check_bounds", True)
+        )
     return _cutile_memory_adapter(array, index, shape, order, traversal_steps)
 
 
 def _cutile_store_adapter(
     array: Any,
     index: Any,
-    tile: Any,
+    tile: Any = None,
     *,
     order: Any = "C",
     traversal_steps: Any = None,
     **kwargs: Any,
 ) -> AdapterResult:
     assert HAS_CUTILE
+    # Scatter uses the Store callback with indexed coordinates.
+    if kwargs.get("_indexed", False):
+        return _cutile_indexed_adapter(
+            array, index, kwargs.get("mask"), kwargs.get("check_bounds", True)
+        )
     return _cutile_memory_adapter(
         array, index, _tile_value(tile).shape, order, traversal_steps
     )
 
 
+def _cutile_indexed_adapter(
+    array: Any,
+    indices: Any,
+    mask: Any = None,
+    check_bounds: bool = True,
+) -> AdapterResult:
+    keys, valid = _indexed_access(array, indices, mask, check_bounds)
+    # Memory callbacks expect arrays, even for scalar indices.
+    if valid.ndim == 0:
+        keys = tuple(key.reshape(1) for key in keys)
+        valid = valid.reshape(1)
+    root = array
+    while root._parent is not None:
+        root = root._parent
+    return AdapterResult(
+        root,
+        Tile(valid),
+        tuple(Tile(key + origin) for key, origin in zip(keys, array._origin)),
+    )
+
+
 def _cutile_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
     assert HAS_CUTILE
-    # Give visualization consumers writable snapshots; interpreter tiles remain
-    # immutable, while the visualizer may convert these arrays to Torch tensors.
+    # Copy read-only tiles before the visualizer converts them to Torch tensors.
     return AdapterResult(Array(x.data.copy()), Array(y.data.copy()))
 
 
@@ -107,6 +137,7 @@ if HAS_CUTILE:
             "load": Load,
             "store": Store,
             "matmul": Dot,
+            "mma": Dot,
             "sum": ReduceSum,
         }
     }

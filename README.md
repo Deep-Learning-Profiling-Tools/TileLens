@@ -153,8 +153,8 @@ triton_viz.launch()
 
 ## DSL Frontends
 
-Triton is the default DSL frontend. NKI support is optional and selected with
-the `frontend` argument:
+Triton is the default DSL frontend. NKI and cuTile are also supported. Select
+them with the `frontend` argument:
 
 ```py
 triton_viz.trace("tracer")  # Triton
@@ -163,46 +163,28 @@ triton_viz.trace("tracer", frontend="nki_beta2")  # NKI Beta 2
 triton_viz.trace("tracer", frontend="cutile")  # cuTile
 ```
 
-The runtime integration code lives under `triton_viz/core/frontend/`. NKI
+The runtime integration code lives under `triton_viz/core/frontend/`. NKI and cuTile
 simulation runtimes live under `triton_viz/core/simulation/`.
 
-### Experimental cuTile tracing
+### cuTile tracing
 
-The cuTile CPU interpreter supports the shared tracer and visualizer:
+cuTile kernels run on the CPU with NumPy arrays and support tracing and visualization:
 
 ```sh
-uv sync --extra cutile --extra test
-uv run --extra cutile --extra test python -m examples.cutile.matmul --visualize
-uv run --extra cutile --extra test python -m examples.cutile.matmul --save /tmp/cutile-matmul.tvz
-uv run --extra cutile --extra test pytest tests/cutile/ -q
+uv run --extra cutile python -m examples.cutile.matmul --visualize
 ```
-
-Wrap a raw Python function or an existing `@ct.kernel` and pass NumPy arrays:
 
 ```py
-traced = triton_viz.trace("tracer", frontend="cutile")(kernel)
-traced[grid](lhs, rhs, result)
-triton_viz.launch(share=False)
+@triton_viz.trace("tracer", frontend="cutile")
+@ct.kernel
+def kernel(lhs, rhs, result):
+    ...
+
+kernel[grid](lhs, rhs, result)
 ```
 
-The frontend adapts tiled loads/stores, matmul, and reductions to shared tracing
-callbacks. Edge tiles carry masks for padded loads and clipped stores. Execution
-uses NumPy on the CPU, runs grid blocks sequentially, and restores the cuTile API
-afterward. The standalone `CuTileInterpretedFunction(...).run(...)` API remains
-available. This integration supports the tracer only; it does not intercept
-`ct.launch`, compile GPU code, or provide cuTile sanitizer/profiler/race analysis.
-
-The interpreter supports array shapes and element strides, `Array.slice()`,
-`Array.tiled_view()` (including traversal steps), tile extraction, broadcasting,
-reshape, permutation, and transpose. Loads and stores accept C, F, or explicit
-axis order. Sliced views share storage and their traces refer to the original
-argument array. Tile subscripts support dimension insertion (`tile[:, None]`);
-use `extract()` for subtiles.
-
-Global inputs and outputs use NumPy `int32` or `float32` arrays; comparison tiles
-also use `bool`. Full cuTile dtype promotion is not implemented. Noncontiguous
-arrays execute in the interpreter, but the shared visualizer assumes contiguous
-storage; use contiguous host arrays for visualization and trace round trips.
+Use contiguous NumPy arrays for visualization. cuTile analysis currently supports
+only the tracer client; numerical behavior may differ from GPU execution.
 
 ## Analysis Clients
 

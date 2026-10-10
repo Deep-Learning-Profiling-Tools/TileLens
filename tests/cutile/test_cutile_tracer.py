@@ -1,4 +1,4 @@
-"""Exercise cuTile tracing through the shared records and visualization API."""
+"""Tests for cuTile tracing and visualization."""
 # ruff: noqa: E402
 
 import math
@@ -30,10 +30,10 @@ def test_matmul_records_and_visualization(shape, tmp_path):
     rhs = np.arange(k * n, dtype=np.float32).reshape(k, n)
     out = np.zeros((m, n), dtype=np.float32)
     grid = (math.ceil(m / TILE_M), math.ceil(n / TILE_N))
-    
+
     traced = triton_viz.trace("tracer", frontend="cutile")(matmul_kernel)
     traced[grid](lhs, rhs, out)
-    
+
     np.testing.assert_allclose(out, lhs @ rhs)
     records = launches[-1].records
     assert sum(isinstance(r, Grid) for r in records) == math.prod(grid)
@@ -80,6 +80,48 @@ def copy_kernel(src, dst):
     block = ct.bid(0)
     tile = ct.load(src, index=(block,), shape=(4,), padding_mode=ct.PaddingMode.ZERO)
     ct.store(dst, index=(block,), tile=tile)
+
+
+def test_indexed_views_and_mma_use_shared_records():
+    @ct.kernel
+    def indexed_kernel(src, dst):
+        view = src.slice(0, 1, 4)
+        indices = ct.arange(4) - 1
+        values = ct.gather(view, indices, padding_value=0)
+        product = ct.mma(
+            ct.reshape(values, (2, 2)),
+            ct.ones((2, 2), ct.float32),
+            ct.zeros((2, 2), ct.float32),
+        )
+        ct.scatter(dst, ct.arange(4), ct.reshape(product, (4,)))
+
+    src = np.array([10, 20, 30, 40], np.float32)
+    dst = np.zeros(4, np.float32)
+    triton_viz.trace("tracer", frontend="cutile")(indexed_kernel)[(1,)](src, dst)
+    np.testing.assert_array_equal(dst, [20, 20, 70, 70])
+    records = launches[-1].records
+    loads = [r for r in records if isinstance(r, Load)]
+    stores = [r for r in records if isinstance(r, Store)]
+    assert len(loads) == len(stores) == 1
+    np.testing.assert_array_equal(loads[0].masks, [False, True, True, True])
+    np.testing.assert_array_equal(loads[0].offsets[loads[0].masks], [4, 8, 12])
+    assert sum(isinstance(r, Dot) for r in records) == 1
+
+
+def test_atomic_updates_trace_memory_and_return_old_values():
+    @ct.kernel
+    def atomic_kernel(values, old):
+        previous = ct.atomic_add(values, ct.full((2,), 0, ct.int32), 1)
+        ct.store(old, (0,), previous)
+
+    values = np.array([10], np.int32)
+    old = np.empty(2, np.int32)
+    triton_viz.trace("tracer", frontend="cutile")(atomic_kernel)[(1,)](values, old)
+    np.testing.assert_array_equal(values, [12])
+    np.testing.assert_array_equal(old, [10, 11])
+    records = launches[-1].records
+    assert sum(isinstance(r, Load) for r in records) == 2
+    assert sum(isinstance(r, Store) for r in records) == 3
 
 
 def test_sampling_and_strided_offsets():
@@ -165,12 +207,35 @@ def test_reduction_and_interpreter_wrapper():
     assert [type(r) for r in launches[-1].records] == [Grid, Load, ReduceSum, Store]
 
 
+@pytest.mark.parametrize("grid", [2, (2,), (2, 2), (2, 2, 2)])
+@pytest.mark.parametrize("trace", [False, True])
+def test_grid_axes(grid, trace):
+    from triton_viz.core.simulation.cutile import CuTileInterpretedFunction
+
+    def kernel(dst):
+        x, y, z = ct.bid(0), ct.bid(1), ct.bid(2)
+        value = ct.full((1, 1, 1), 100 * x + 10 * y + z, ct.int32)
+        ct.store(dst, (x, y, z), value)
+
+    shape = (grid,) if isinstance(grid, int) else grid
+    shape += (1,) * (3 - len(shape))
+    dst = np.full(shape, -1, dtype=np.int32)
+    runner = (
+        triton_viz.trace(frontend="cutile")(kernel)
+        if trace
+        else CuTileInterpretedFunction(kernel)
+    )
+    runner.run(dst, grid=grid)
+    x, y, z = np.indices(shape)
+    np.testing.assert_array_equal(dst, 100 * x + 10 * y + z)
+
+
 def test_unsupported_client_is_rejected():
     with pytest.raises(ValueError, match="only the tracer"):
         triton_viz.trace("profiler", frontend="cutile")(copy_kernel)
 
 
-def test_sliced_tiled_trace_uses_original_array(tmp_path):
+def test_trace_tiled_views(tmp_path):
     triton_viz.clear()
 
     @triton_viz.trace(frontend="cutile")
