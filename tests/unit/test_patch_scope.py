@@ -1,4 +1,3 @@
-import pytest
 import warnings
 from types import SimpleNamespace
 
@@ -6,8 +5,8 @@ import numpy as np
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
-from triton_viz.core import patch as patch_mod
-from triton_viz.core.frontend import triton as triton_frontend
+from tilelens.core import patch as patch_mod
+from tilelens.core.frontend import triton as triton_frontend
 
 
 def _dummy_kernel():
@@ -85,13 +84,8 @@ def test_scope_removes_tensor_magic_methods_added_by_interpreter():
 
 def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
     """Scope must restore descriptor builtins on tensor_descriptor_base."""
-    if not hasattr(tl.core, "tensor_descriptor_base"):
-        pytest.skip("tensor_descriptor_base is not available")
-
     descriptor = tl.core.tensor_descriptor_base
     attr = "load"
-    if not hasattr(descriptor, attr):
-        pytest.skip("descriptor load is not available")
 
     original = getattr(descriptor, attr)
     sentinel = object()
@@ -193,8 +187,8 @@ def test_patch_lang_accepts_constexpr_wrapped_symbolic_tensors():
 
 
 def test_patch_lang_does_not_inject_loop_global():
-    legacy_key = "_triton_viz_" + "loop_patcher"
-    wrapper_key = "_triton_viz_loop_iter_wrapper"
+    legacy_key = "_tilelens_" + "loop_patcher"
+    wrapper_key = "_tilelens_loop_iter_wrapper"
     globals_dict = _dummy_kernel.__globals__
 
     class ClientManagerStub:

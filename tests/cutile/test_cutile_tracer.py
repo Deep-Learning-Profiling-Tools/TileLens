@@ -8,19 +8,19 @@ import pytest
 
 ct = pytest.importorskip("cuda.tile")
 
-import triton_viz
-from triton_viz.clients import Tracer
-from triton_viz.core.data import Dot, Grid, Load, Store
-from triton_viz.core.simulation.cutile import cutile_builder
-from triton_viz.core.trace import launches
+import tilelens
+from tilelens.clients import Tracer
+from tilelens.core.data import Dot, Grid, Load, Store
+from tilelens.core.simulation.cutile import cutile_builder
+from tilelens.core.trace import launches
 from examples.cutile.matmul import matmul_kernel, TILE_M, TILE_N
 
 
 @pytest.fixture(autouse=True)
 def clear_traces():
-    triton_viz.clear()
+    tilelens.clear()
     yield
-    triton_viz.clear()
+    tilelens.clear()
 
 
 @pytest.mark.parametrize("shape", [(4, 8, 16), (3, 5, 9)])
@@ -31,7 +31,7 @@ def test_matmul_records_and_visualization(shape, tmp_path):
     out = np.zeros((m, n), dtype=np.float32)
     grid = (math.ceil(m / TILE_M), math.ceil(n / TILE_N))
 
-    traced = triton_viz.trace("tracer", frontend="cutile")(matmul_kernel)
+    traced = tilelens.trace("tracer", frontend="cutile")(matmul_kernel)
     traced[grid](lhs, rhs, out)
 
     np.testing.assert_allclose(out, lhs @ rhs)
@@ -47,7 +47,7 @@ def test_matmul_records_and_visualization(shape, tmp_path):
     if m == 3:
         assert any(not r.masks.all() for r in loads)
 
-    from triton_viz.visualizer import interface
+    from tilelens.visualizer import interface
 
     def check_visualization():
         interface.update_global_data(force=True)
@@ -70,9 +70,9 @@ def test_matmul_records_and_visualization(shape, tmp_path):
 
     check_visualization()
     path = tmp_path / "matmul.tvz"
-    triton_viz.save(path)
-    triton_viz.clear()
-    triton_viz.load(path)
+    tilelens.save(path)
+    tilelens.clear()
+    tilelens.load(path)
     check_visualization()
 
 
@@ -97,7 +97,7 @@ def test_indexed_views_and_mma_use_shared_records():
 
     src = np.array([10, 20, 30, 40], np.float32)
     dst = np.zeros(4, np.float32)
-    triton_viz.trace("tracer", frontend="cutile")(indexed_kernel)[(1,)](src, dst)
+    tilelens.trace("tracer", frontend="cutile")(indexed_kernel)[(1,)](src, dst)
     np.testing.assert_array_equal(dst, [20, 20, 70, 70])
     records = launches[-1].records
     loads = [r for r in records if isinstance(r, Load)]
@@ -116,7 +116,7 @@ def test_atomic_updates_trace_memory_and_return_old_values():
 
     values = np.array([10], np.int32)
     old = np.empty(2, np.int32)
-    triton_viz.trace("tracer", frontend="cutile")(atomic_kernel)[(1,)](values, old)
+    tilelens.trace("tracer", frontend="cutile")(atomic_kernel)[(1,)](values, old)
     np.testing.assert_array_equal(values, [12])
     np.testing.assert_array_equal(old, [10, 11])
     records = launches[-1].records
@@ -127,7 +127,7 @@ def test_atomic_updates_trace_memory_and_return_old_values():
 def test_sampling_and_strided_offsets():
     src = np.arange(24, dtype=np.float32)[::2]
     dst = np.zeros(24, dtype=np.float32)[::2]
-    traced = triton_viz.trace(Tracer(grid_idx=1), frontend="cutile")(copy_kernel)
+    traced = tilelens.trace(Tracer(grid_idx=1), frontend="cutile")(copy_kernel)
     traced.run(src=src, dst=dst, grid=(3,))
     np.testing.assert_array_equal(dst, src)
     records = launches[-1].records
@@ -138,7 +138,7 @@ def test_sampling_and_strided_offsets():
 
 @pytest.mark.parametrize("traced", [False, True])
 def test_failure_restores_patches(traced):
-    from triton_viz.core.simulation.cutile import CuTileInterpretedFunction
+    from tilelens.core.simulation.cutile import CuTileInterpretedFunction
 
     original_load = ct.load
     original_builder_load = cutile_builder.load
@@ -149,7 +149,7 @@ def test_failure_restores_patches(traced):
         raise RuntimeError("intentional failure")
 
     runner = (
-        triton_viz.trace("tracer", frontend="cutile")(failing_kernel)
+        tilelens.trace("tracer", frontend="cutile")(failing_kernel)
         if traced
         else CuTileInterpretedFunction(failing_kernel)
     )
@@ -162,8 +162,8 @@ def test_failure_restores_patches(traced):
 
 @pytest.mark.parametrize("traced", [False, True])
 def test_frontend_owns_language_patch(monkeypatch, traced):
-    from triton_viz.core.frontend.cutile import frontend
-    from triton_viz.core.simulation.cutile import CuTileInterpretedFunction
+    from tilelens.core.frontend.cutile import frontend
+    from tilelens.core.simulation.cutile import CuTileInterpretedFunction
 
     original_load = ct.load
     patch_lang = frontend.patch_lang
@@ -175,7 +175,7 @@ def test_frontend_owns_language_patch(monkeypatch, traced):
 
     monkeypatch.setattr(frontend, "patch_lang", record_patch)
     runner = (
-        triton_viz.trace(frontend="cutile")(copy_kernel)
+        tilelens.trace(frontend="cutile")(copy_kernel)
         if traced
         else CuTileInterpretedFunction(copy_kernel)
     )
@@ -191,16 +191,14 @@ def test_frontend_owns_language_patch(monkeypatch, traced):
 
 
 def test_reduction_and_interpreter_wrapper():
-    from triton_viz.core.data import ReduceSum
-    from triton_viz.core.simulation.cutile import CuTileInterpretedFunction
+    from tilelens.core.data import ReduceSum
+    from tilelens.core.simulation.cutile import CuTileInterpretedFunction
 
     def reduce_kernel(src, dst):
         tile = ct.load(src, (0,), (4,))
         ct.store(dst, (0,), ct.sum(tile, axis=0))
 
-    traced = triton_viz.trace(frontend="cutile")(
-        CuTileInterpretedFunction(reduce_kernel)
-    )
+    traced = tilelens.trace(frontend="cutile")(CuTileInterpretedFunction(reduce_kernel))
     dst = np.zeros(1, dtype=np.float32)
     traced(np.arange(4, dtype=np.float32), dst)
     np.testing.assert_array_equal(dst, [6])
@@ -210,7 +208,7 @@ def test_reduction_and_interpreter_wrapper():
 @pytest.mark.parametrize("grid", [2, (2,), (2, 2), (2, 2, 2)])
 @pytest.mark.parametrize("trace", [False, True])
 def test_grid_axes(grid, trace):
-    from triton_viz.core.simulation.cutile import CuTileInterpretedFunction
+    from tilelens.core.simulation.cutile import CuTileInterpretedFunction
 
     def kernel(dst):
         x, y, z = ct.bid(0), ct.bid(1), ct.bid(2)
@@ -221,7 +219,7 @@ def test_grid_axes(grid, trace):
     shape += (1,) * (3 - len(shape))
     dst = np.full(shape, -1, dtype=np.int32)
     runner = (
-        triton_viz.trace(frontend="cutile")(kernel)
+        tilelens.trace(frontend="cutile")(kernel)
         if trace
         else CuTileInterpretedFunction(kernel)
     )
@@ -232,13 +230,13 @@ def test_grid_axes(grid, trace):
 
 def test_unsupported_client_is_rejected():
     with pytest.raises(ValueError, match="only the tracer"):
-        triton_viz.trace("profiler", frontend="cutile")(copy_kernel)
+        tilelens.trace("profiler", frontend="cutile")(copy_kernel)
 
 
 def test_trace_tiled_views(tmp_path):
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(frontend="cutile")
+    @tilelens.trace(frontend="cutile")
     def kernel(src, dst):
         src_view = src.slice(0, 1, 4).slice(1, 2, 7)
         dst_view = dst.slice(0, 1, 4).slice(1, 2, 7)
@@ -260,11 +258,11 @@ def test_trace_tiled_views(tmp_path):
             records[0].offsets, np.array([[10, 11, 12, 13], [18, 19, 20, 21]]) * 4
         )
         assert records[-1].masks.sum() == 1
-        triton_viz.save(tmp_path / "views.tvz")
-        triton_viz.load(tmp_path / "views.tvz")
-        from triton_viz.visualizer.interface import app, update_global_data
+        tilelens.save(tmp_path / "views.tvz")
+        tilelens.load(tmp_path / "views.tvz")
+        from tilelens.visualizer.interface import app, update_global_data
 
         update_global_data(force=True)
         assert app.test_client().get("/api/data").status_code == 200
     finally:
-        triton_viz.clear()
+        tilelens.clear()

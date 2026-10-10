@@ -7,7 +7,7 @@ import pytest
 
 ct = pytest.importorskip("cuda.tile")
 
-from triton_viz.core.simulation.cutile import (  # noqa: E402
+from tilelens.core.simulation.cutile import (  # noqa: E402
     Array,
     CuTileInterpretedFunction,
     Tile,

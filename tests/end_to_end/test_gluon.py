@@ -6,30 +6,22 @@ import torch
 from triton import knobs
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language.amd.cdna4 import async_copy as amd_cdna4_cp
 from triton.experimental.gluon.language.nvidia import blackwell, hopper
 from triton.experimental.gluon.language.nvidia.blackwell import tma as blackwell_tma
 from triton.experimental.gluon.language.nvidia.hopper import (
     mbarrier,
     tma,
 )
-from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
+from triton.experimental.gluon.nvidia.hopper import (
+    TensorDescriptor,
+    TensorDescriptorIm2Col,
+)
 
-import triton_viz
-from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
-from triton_viz.core.data import Load
-from triton_viz.core.simulation.gluon import GluonInterpretedFunction, gluon_builder
-
-try:
-    from triton.experimental.gluon.language.amd.cdna4 import (
-        async_copy as amd_cdna4_cp,
-    )
-except ImportError:
-    amd_cdna4_cp = None
-
-try:
-    from triton.experimental.gluon.nvidia.hopper import TensorDescriptorIm2Col
-except ImportError:
-    TensorDescriptorIm2Col = None
+import tilelens
+from tilelens.clients.sanitizer.sanitizer import SymbolicSanitizer
+from tilelens.core.data import Load
+from tilelens.core.simulation.gluon import GluonInterpretedFunction, gluon_builder
 
 try:
     from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
@@ -39,11 +31,6 @@ except ImportError:
 _HAS_AMPERE_ASYNC_COPY = (
     cp is not None and getattr(cp, "async_copy_global_to_local", None) is not None
 )
-_HAS_AMD_CDNA4_ASYNC_COPY = (
-    amd_cdna4_cp is not None
-    and getattr(amd_cdna4_cp, "global_load_to_shared", None) is not None
-)
-_HAS_TMA_IM2COL = TensorDescriptorIm2Col is not None
 
 
 def _run_gluon_on_cpu(fn, grid, *args, **kwargs):
@@ -795,7 +782,7 @@ def _tensor_memory_roundtrip_kernel(
 
 
 def test_gluon_trace_runs_copy_scalar_kernel():
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
 
     inp = torch.tensor([42.0])
     out = torch.empty_like(inp)
@@ -808,7 +795,7 @@ def test_gluon_trace_runs_copy_scalar_kernel():
 
 def test_gluon_sanitizer_allows_in_bounds_kernel():
     sanitizer = SymbolicSanitizer(abort_on_error=False)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=sanitizer,
         frontend="gluon",
     )(_copy_scalar_kernel)
@@ -824,7 +811,7 @@ def test_gluon_sanitizer_allows_in_bounds_kernel():
 def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
     monkeypatch.setattr(knobs.compilation, "always_compile", True)
     sanitizer = SymbolicSanitizer(abort_on_error=False)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=sanitizer,
         frontend="gluon",
     )(_oob_scalar_offset_kernel)
@@ -845,7 +832,7 @@ def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
 
 def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
     sanitizer = SymbolicSanitizer(abort_on_error=False)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=sanitizer,
         frontend="gluon",
     )(_masked_safe_kernel)
@@ -862,7 +849,7 @@ def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
 def test_gluon_core_ops_run_scalar_range_memcpy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full_like(inp, -1)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_range_memcpy_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_range_memcpy_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), 64, num_warps=1)
 
@@ -874,7 +861,7 @@ def test_gluon_core_ops_run_masked_1d_memcpy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full_like(inp, -1)
     layout = gl.BlockedLayout([1], [32], [1], [0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_masked_1d_memcpy_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_masked_1d_memcpy_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), 64, layout, num_warps=1)
 
@@ -885,7 +872,7 @@ def test_gluon_core_ops_run_masked_2d_memcpy_on_cpu():
     inp = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     out = torch.full_like(inp, -1)
     layout = gl.BlockedLayout([1, 1], [1, 32], [4, 1], [1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_masked_2d_memcpy_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_masked_2d_memcpy_kernel)
 
     kernel[(1, 1)](
         inp,
@@ -908,7 +895,7 @@ def test_gluon_core_ops_run_converted_layout_elementwise_add_on_cpu():
     out = torch.full_like(a, -1)
     layout_in = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
     layout_out = gl.BlockedLayout([1, 1], [1, 32], [4, 1], [1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_converted_layout_add_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_converted_layout_add_kernel)
 
     kernel[(1,)](
         a,
@@ -935,21 +922,17 @@ def test_gluon_core_ops_run_converted_layout_elementwise_add_on_cpu():
 def test_gluon_async_copy_runs_masked_1d_copy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full_like(inp, -1)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_async_copy_1d_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_async_copy_1d_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), 64, num_warps=4)
 
     torch.testing.assert_close(out, inp, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(
-    not _HAS_AMD_CDNA4_ASYNC_COPY,
-    reason="Gluon AMD CDNA4 async copy builtins are unavailable",
-)
 def test_gluon_amd_async_copy_preserves_masked_other_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full((64,), -1, dtype=torch.float32)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_async_copy_other_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_amd_async_copy_other_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), out.numel(), num_warps=4)
 
@@ -966,7 +949,7 @@ def test_gluon_async_copy_runs_staged_elementwise_add_on_cpu():
     b = 10 + a
     out = torch.full_like(a, -1)
     smem_layout = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
+    kernel = tilelens.trace("tracer", frontend="gluon")(
         _async_copy_elementwise_add_kernel
     )
 
@@ -1058,10 +1041,6 @@ def test_gluon_tma_runs_float_atomics_on_cpu():
     torch.testing.assert_close(max_dst, expected_max, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(
-    not _HAS_TMA_IM2COL,
-    reason="Gluon TensorDescriptorIm2Col is unavailable in this Triton build",
-)
 def test_gluon_tma_im2col_runs_simple_tile_on_cpu():
     inp = torch.arange(1, 17, dtype=torch.float32).unsqueeze(1).repeat(1, 32)
     inp = inp.reshape(1, 4, 4, 32)
@@ -1071,10 +1050,6 @@ def test_gluon_tma_im2col_runs_simple_tile_on_cpu():
     torch.testing.assert_close(out, inp.reshape(16, 32), atol=0, rtol=0)
 
 
-@pytest.mark.skipif(
-    not _HAS_TMA_IM2COL,
-    reason="Gluon TensorDescriptorIm2Col is unavailable in this Triton build",
-)
 def test_gluon_tma_im2col_zero_fills_padded_pixels_on_cpu():
     inp = torch.arange(1, 17, dtype=torch.float32).unsqueeze(1).repeat(1, 32)
     inp = inp.reshape(1, 4, 4, 32)
@@ -1088,10 +1063,6 @@ def test_gluon_tma_im2col_zero_fills_padded_pixels_on_cpu():
     torch.testing.assert_close(out[:, 0], expected_first_channel, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(
-    not _HAS_TMA_IM2COL,
-    reason="Gluon TensorDescriptorIm2Col is unavailable in this Triton build",
-)
 def test_gluon_tma_im2col_honors_runtime_offsets_on_cpu():
     inp = torch.arange(1, 17, dtype=torch.float32).unsqueeze(1).repeat(1, 32)
     inp = inp.reshape(1, 4, 4, 32)
@@ -1125,8 +1096,6 @@ def test_gluon_builder_preserves_tensor_memory_fp4_padding():
         False,
         True,
     )
-    if not hasattr(layout, "fp4_padded"):
-        pytest.skip("Gluon TensorMemoryLayout has no fp4_padded field")
     assert layout.fp4_padded is True
 
 

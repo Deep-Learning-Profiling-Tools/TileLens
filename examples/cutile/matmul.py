@@ -6,7 +6,7 @@ import math
 import cuda.tile as ct
 import numpy as np
 
-import triton_viz
+import tilelens
 
 
 TILE_M = 2
@@ -65,16 +65,16 @@ def _run_demo():
     kernel_grid = (math.ceil(M / TILE_M), math.ceil(N / TILE_N))
 
     print("Executing matmul_kernel with the cuTile NumPy interpreter...")
-    traced_kernel = triton_viz.trace("tracer", frontend="cutile")(matmul_kernel)
+    traced_kernel = tilelens.trace("tracer", frontend="cutile")(matmul_kernel)
     traced_kernel[kernel_grid](lhs, rhs, result)
 
     expected = lhs @ rhs
     print(np.max(np.abs(expected - result)))
     assert np.allclose(expected, result)
     if args.save:
-        triton_viz.save(args.save)
+        tilelens.save(args.save)
     if args.visualize:
-        triton_viz.launch(share=False)
+        tilelens.launch(share=False)
 
 
 if __name__ == "__main__":
